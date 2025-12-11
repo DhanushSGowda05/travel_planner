@@ -1,7 +1,6 @@
 import React from "react";
 import { DashboardNavbar } from "@/components/dashboard/DashboardNavbar";
 import { WelcomeBanner } from "@/components/dashboard/WelcomeBanner";
-import { StatsGrid } from "@/components/dashboard/StatsGrid";
 import { QuickActions } from "@/components/dashboard/QuickActions";
 import { MyTrips } from "@/components/dashboard/MyTrips";
 import { TravelInsights } from "@/components/dashboard/TravelInsights";
@@ -16,10 +15,9 @@ export function DashboardPage() {
       {/* Main Content */}
       <main className="flex-1 mx-auto w-full max-w-7xl px-6 lg:px-8 py-10 space-y-16">
         
-        {/* Welcome + Stats Section */}
+        {/* Welcome Section */}
         <section className="space-y-8">
           <WelcomeBanner />
-          <StatsGrid />
         </section>
 
         {/* Quick Actions */}
@@ -27,7 +25,7 @@ export function DashboardPage() {
           <QuickActions />
         </section>
 
-        {/* My Trips */}
+        {/* My Trips (StatsGrid is inside this) */}
         <section className="mt-12">
           <h2 className="text-xl font-semibold text-slate-900 mb-4">🧳 Your Trips</h2>
           <MyTrips />
@@ -41,12 +39,10 @@ export function DashboardPage() {
 
         {/* Recommended Destinations */}
         <section className="mt-12 mb-16">
-          
           <Recommendations />
         </section>
       </main>
     </div>
-
   );
 }
 

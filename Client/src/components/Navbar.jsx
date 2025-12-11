@@ -38,15 +38,11 @@ export function Navbar() {
           {/* Right: Buttons */}
           <div className="flex items-center gap-3">
             <Link to='/SignIn'>
-              <Button variant="ghost" className="hidden sm:inline-flex">
+              <Button variant="ghost" className="hidden sm:inline-flex border border-slate-300">
                 Sign In
               </Button>
             </Link>
-            <Link to="/dashboard">
-              <Button>
-                Start Planning
-              </Button>
-            </Link>
+            
             <Button variant="ghost" size="icon" className="md:hidden">
               <Menu className="h-5 w-5 text-slate-700" />
             </Button>

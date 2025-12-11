@@ -1,34 +1,66 @@
 import React from "react";
+import { Plane, Train, Bus } from "lucide-react";
 
 export default function TransportCard({ option, selected, onSelect }) {
-  // option expected fields: optionId, provider, price, durationMin, depart, arrive, meta
+  const mode = option.type; // "flight" | "train" | "bus"
+
+  const Icon =
+    mode === "flight" ? Plane :
+    mode === "train" ? Train :
+    Bus;
+
   return (
     <div
-      className={`border rounded-lg p-4 cursor-pointer transition-shadow ${
-        selected ? "shadow-lg border-cyan-500" : "hover:shadow-md"
-      }`}
       onClick={() => onSelect(option)}
+      className={`
+        cursor-pointer rounded-xl p-5 
+        backdrop-blur-xl bg-white/20 border 
+        transition-all duration-300
+        ${selected ? "border-cyan-400 shadow-2xl scale-[1.02]" : "border-white/30 hover:border-cyan-200 hover:shadow-lg"}
+      `}
     >
-      <div className="flex justify-between items-start">
-        <div>
-          <div className="font-semibold text-slate-900">{option.provider}</div>
-          <div className="text-sm text-slate-600">{option.depart} → {option.arrive}</div>
+
+      {/* Header */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Icon className="h-5 w-5 text-white drop-shadow" />
+          <span className="text-white font-semibold capitalize">
+            {mode}
+          </span>
         </div>
+
         <div className="text-right">
-          <div className="text-lg font-bold">₹{option.price}</div>
-          <div className="text-sm text-slate-500">{option.durationMin} min</div>
+          <div className="text-2xl font-bold text-white drop-shadow">₹{option.price_INR}</div>
+          <div className="text-white/80 text-sm">
+            {option.durationMin ? `${option.durationMin} min` : ""}
+          </div>
         </div>
       </div>
 
+      {/* Route */}
+      <div className="bg-white/20 rounded-lg px-4 py-3 shadow-inner text-white">
+        <div className="flex justify-between">
+          <div className="font-semibold">{option.source_city}</div>
+          <div className="text-sm text-white/80">→</div>
+          <div className="font-semibold">{option.destination_city}</div>
+        </div>
+        <div className="text-white/70 text-xs mt-1">
+          {option.departure_date}
+        </div>
+      </div>
+
+      {/* Extra metadata */}
       {option.meta && (
-        <div className="mt-3 text-xs text-slate-600">
+        <div className="mt-3 text-white/90 text-xs">
           {Object.entries(option.meta).map(([k, v]) => (
-            <span key={k} className="mr-3">
-              <strong>{k}:</strong> {String(v)}
-            </span>
+            <div key={k} className="flex justify-between">
+              <span className="capitalize">{k}</span>
+              <span className="font-semibold">{String(v)}</span>
+            </div>
           ))}
         </div>
       )}
+
     </div>
   );
 }

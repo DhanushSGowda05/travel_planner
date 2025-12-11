@@ -31,11 +31,6 @@ app = Flask(__name__)
 app.config["SECRET_KEY"] = "123546879"
 app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///users.db"
 app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
-app.config["SESSION_COOKIE_HTTPONLY"] = True
-app.config["SESSION_COOKIE_SECURE"] = False
-app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
-
-
 
 # --- INITIALIZE EXTENSIONS ---
 db = SQLAlchemy(app)
@@ -44,20 +39,11 @@ db = SQLAlchemy(app)
 #   - CORS(app): Allows all origins (e.g., localhost:3000)
 #   - supports_credentials=True: Allows Flask to send the session cookie
 #     to your React app.
-from flask_cors import CORS
-
-
-
 CORS(
     app,
     supports_credentials=True,
     resources={ r"/*": {"origins": ["http://127.0.0.1:5173", "http://localhost:5173"]}},
 )
-
-
-
-
-
 
 login_manager = LoginManager()
 login_manager.init_app(app)
@@ -111,8 +97,10 @@ class Trip(db.Model):
     transport_type = db.Column(db.String(50), nullable=True)
     accommodation_type = db.Column(db.String(50), nullable=True)
     acc_loc=db.Column(db.String(100), nullable=True)
-    mode=db.Column(db.String(100), nullable=True)
-    mode_id=db.Column(db.String(100), nullable=True)
+    up_mode=db.Column(db.String(100), nullable=True)
+    up_mode_id=db.Column(db.String(100), nullable=True)
+    down_mode=db.Column(db.String(100), nullable=True)
+    down_mode_id=db.Column(db.String(100), nullable=True)
     hotel_id=db.Column(db.String(100), nullable=True)
 
 # --- FLASK-LOGIN CALLBACKS ---
@@ -246,15 +234,7 @@ def signup():
         db.session.commit()
         login_user(new_user)
 
-        return jsonify({
-    "message": f"User {new_user.name} created successfully!",
-    "user": {
-        "id": new_user.id,
-        "name": new_user.name,
-        "email": new_user.email
-    }
-}), 201
-
+        return jsonify({"message": f"User {new_user.name} created successfully!"}), 201
 
     except ValidationError as e:
         # CHANGED: Handle Pydantic validation errors
@@ -297,19 +277,6 @@ def login():
         # Return the errors in the same format as Flask-WTF
         return jsonify({"errors": format_pydantic_errors(e)}), 400
 
-@app.route("/me", methods=["GET"])
-def me():
-    if current_user.is_authenticated:
-        return jsonify({
-            "user": {
-                "id": current_user.id,
-                "name": current_user.name,
-                "email": current_user.email
-            }
-        }), 200
-    else:
-        return jsonify({"user": None}), 200
-
 
 @app.route("/list_trips", methods=["GET"])
 @login_required
@@ -336,12 +303,48 @@ def list_trips():
             "destination_city": trip.destination_city,
             "start_date": trip.start_date.isoformat(), # Format as "YYYY-MM-DD" string
             "end_date": trip.end_date.isoformat(),
+            
             # Calculated field
             "days_left": days_left
         })
         
     # 3. Return the list of trip objects
     return jsonify(trips_data), 200
+
+
+@app.route("/delete_trip", methods=["POST"])
+@login_required
+def delete_trip_json():
+    data = request.get_json()
+    if not data or 'trip_id' not in data:
+        return jsonify({"error": "Missing 'trip_id' in JSON body"}), 400
+
+    try:
+        trip_id = data['trip_id']
+    except ValueError:
+        return jsonify({"error": "Invalid trip ID format. Must be an integer."}), 400
+    trip = Trip.query.filter_by(id=trip_id).first()
+    print(trip)
+    # 3. Handle case where the trip is not found or unauthorized
+    if trip is None:
+        return jsonify({"error": "Trip not found or unauthorized"}), 404
+
+    try:
+        # 4. Delete the trip
+        db.session.delete(trip)
+        
+        # 5. Commit the transaction
+        db.session.commit()
+        
+        # 6. Return success (200 OK with a confirmation message)
+        return jsonify({"message": f"Trip ID {trip_id} successfully deleted."}), 200
+        
+    except Exception as e:
+        # 7. Handle potential database errors
+        db.session.rollback()
+        print(f"Database error during trip deletion (POST): {e}")
+        return jsonify({"error": "An internal error occurred during deletion"}), 500
+    
 
 
 # --- NEW --- Endpoint to create a new trip
@@ -440,120 +443,131 @@ def update_transport():
 @app.route("/transport_option", methods=["POST"])
 @login_required
 def transport_option():
-    data = request.get_json()
-    trip_id = data.get("trip_id")
-    a_d = data.get("a_d")
+    try:
+        data = request.get_json()
+        trip_id = data.get('trip_id')
+        trip = db.session.get(Trip, trip_id)
 
-    # Fetch trip safely
-    trip = db.session.get(Trip, trip_id)
-    if not trip:
-        return jsonify({"error": "Trip not found"}), 404
+        if not trip:
+            return jsonify({"error": "Trip not found"}), 404
 
-    # Determine direction (arrival or departure)
-    if a_d == "a":  
-        src = trip.origin_city
-        dest = trip.destination_city
-        date_val = trip.start_date
-    else:  
-        src = trip.destination_city
-        dest = trip.origin_city
-        date_val = trip.end_date
+        u_d = data.get('u_d')
+        if u_d == 'u':
+            src = trip.origin_city
+            dest = trip.destination_city
+            # Ensure start_date is a standard date object
+            if isinstance(trip.start_date, str):
+                start_date = pd.to_datetime(trip.start_date).date()
+            else:
+                start_date = trip.start_date
+        else:
+            src = trip.destination_city
+            dest = trip.origin_city
+            if isinstance(trip.end_date, str):
+                start_date = pd.to_datetime(trip.end_date).date()
+            else:
+                start_date = trip.end_date
 
-    ppl = trip.num_people
-    bud_type = (trip.transport_type or "standard").lower()
+        bud_type = trip.transport_type
+        ppl = trip.num_people
 
-    # -------------------------------
-    # CITY NORMALIZATION
-    # -------------------------------
-    CITY_MAP = {
-        "bangalore": "Bangalore",
-        "bengaluru": "Bangalore",
-        "mysore": "Mysuru",
-        "mysuru": "Mysuru",
-        "mangalore": "Mangaluru",
-        "mangaluru": "Mangaluru",
-        "tumkur": "Tumkuru",
-        "tumakuru": "Tumkuru",
-        "hydrabad": "Hyderabad",
-        "hyderabad": "Hyderabad",
-        "bombay": "Mumbai",
-        "mumbai": "Mumbai",
-    }
+        # Helper function to calculate price limit safely
+        def get_price_limit(transport_result, budget_type):
+            if not transport_result:  # If list is empty, return Infinity (accept nothing or all)
+                return 0
+            
+            prices = [item[0][1] for item in transport_result]
+            if not prices: return 0
 
-    src_norm = CITY_MAP.get(src.lower(), src)
-    dest_norm = CITY_MAP.get(dest.lower(), dest)
+            budget_mapping = {'basic': 1, 'economy': 2, 'standard': 3, 'premium': 4, 'luxury': 5}
+            multiplier = budget_mapping.get(budget_type.lower(), 3) # Default to standard
+            
+            min_price = min(prices)
+            max_price = max(prices)
+            price_difference = max_price - min_price
+            return (multiplier / 5) * price_difference + min_price
 
-    # -------------------------------
-    # Budget multiplier mapping
-    # -------------------------------
-    budget_mapping = {
-        "basic": 1,
-        "economy": 2,
-        "standard": 3,
-        "premium": 4,
-        "luxury": 5,
-    }
-    multiplier = budget_mapping.get(bud_type, 3)
+        # --- PROCESS BUS ---
+        bus['departure_date'] = pd.to_datetime(bus['departure_date'])
+        
+        filtered_buses = bus[
+            (bus['source_city'] == src) & 
+            (bus['destination_city'] == dest) & 
+            (bus['departure_date'].dt.date == start_date) & 
+            (bus['available_seats'] >= ppl)
+        ].copy() # Use .copy() to avoid SettingWithCopy warnings
 
-    # -------------------------------
-    # HELPER FUNCTION — generic processor for bus/train/flight
-    # -------------------------------
-    def process_transport(df, id_col):
-        if df.empty:
-            return []
+        # Logic to filter by price
+        if not filtered_buses.empty:
+            bus_result = []
+            for index, row in filtered_buses.iterrows():
+                bus_result.append([(row['bus_id'], row['price'])])
+            
+            limit = get_price_limit(bus_result, bud_type)
+            # Filter the dataframe directly
+            final_buses = filtered_buses[filtered_buses['price'] <= limit]
+        else:
+            final_buses = pd.DataFrame() # Empty if no buses found
 
-        df = df.copy()
+        # --- PROCESS TRAIN ---
+        train.columns = train.columns.str.strip()
+        train['departure_date'] = pd.to_datetime(train['departure_date'])
+        
+        filtered_trains = train[
+            (train['source_city'] == src) & 
+            (train['destination_city'] == dest) & 
+            (train['departure_date'].dt.date == start_date) & 
+            (train['available_seats'] >= ppl)
+        ].copy()
 
-        # Clean dates
-        df["departure_date"] = pd.to_datetime(df["departure_date"])
-        d = pd.to_datetime(date_val).date()
+        if not filtered_trains.empty:
+            train_result = []
+            for index, row in filtered_trains.iterrows():
+                train_result.append([(row['train_id'], row['price'])])
+            
+            limit = get_price_limit(train_result, bud_type)
+            final_trains = filtered_trains[filtered_trains['price'] <= limit]
+        else:
+            final_trains = pd.DataFrame()
 
-        # Filter by city, date, seats
-        filtered = df[
-            (df["source_city"] == src_norm) &
-            (df["destination_city"] == dest_norm) &
-            (df["departure_date"].dt.date == d) &
-            (df["availability_seats"] >= ppl)
-        ]
+        # --- PROCESS FLIGHT ---
+        flight['departure_date'] = pd.to_datetime(flight['departure_date'])
+        
+        filtered_flights = flight[
+            (flight['source_city'] == src) & 
+            (flight['destination_city'] == dest) & 
+            (flight['departure_date'].dt.date == start_date) & 
+            (flight['available_seats'] >= ppl)
+        ].copy()
 
-        if filtered.empty:
-            return []
+        if not filtered_flights.empty:
+            flight_result = []
+            for index, row in filtered_flights.iterrows():
+                flight_result.append([(row['flight_id'], row['price'])])
+            
+            limit = get_price_limit(flight_result, bud_type)
+            final_flights = filtered_flights[filtered_flights['price'] <= limit]
+        else:
+            final_flights = pd.DataFrame()
 
-        # Extract price list
-        prices = filtered["price_INR"].tolist()
+        # --- PREPARE RESPONSE ---
+        # Convert Timestamps to strings to avoid JSON errors
+        # We assume standard string conversion is fine for the response
+        
+        master_data = {
+            "bus": final_buses.to_dict(orient='records'),
+            "train": final_trains.to_dict(orient='records'),
+            "flight": final_flights.to_dict(orient='records')
+        }
 
-        if not prices:
-            return []
+        # FIX: Directly pass the dictionary to jsonify. 
+        # Do NOT use json.dumps() here.
+        return jsonify(master_data), 200
 
-        # Compute budget-based upper limit
-        min_price = min(prices)
-        max_price = max(prices)
-        diff = max_price - min_price
-        upper = (multiplier / 5) * diff + min_price
-
-        # Keep only those ≤ upper limit
-        final_df = filtered[filtered["price_INR"] <= upper]
-
-        return final_df.to_dict(orient="records")
-
-    # -------------------------------
-    # Process each dataset
-    # -------------------------------
-    bus_data = process_transport(bus, "bus_id")
-    train_data = process_transport(train, "train_id")
-    flight_data = process_transport(flight, "flight_id")
-
-    # -------------------------------
-    # Return final JSON
-    # -------------------------------
-    return jsonify({
-        "bus": bus_data,
-        "train": train_data,
-        "flight": flight_data
-    }), 200
-
-
-
+    except Exception as e:
+        # This will print the actual error to your terminal so you can debug
+        print(f"Error in transport_option: {e}")
+        return jsonify({"error": str(e)}), 500
     
 
 
@@ -605,9 +619,9 @@ def update_accomodation():
         return jsonify({"errors": {"database": str(e)}}), 500
 
 
-@app.route("/transport_choice",methods=["POST"])
+@app.route("/up_transport_choice",methods=["POST"])
 @login_required
-def transport_choice():
+def up_transport_choice():
     data = request.get_json()
     trip_id = data.get('trip_id')
     if not trip_id:
@@ -615,8 +629,26 @@ def transport_choice():
 
     # 2. Find the trip in the database
     trip = db.session.get(Trip, trip_id)
-    trip.mode=data['mode']
-    trip.mode_id=data['mode_id']
+    trip.up_mode=data['up_mode']
+    trip.up_mode_id=data['up_mode_id']
+    db.session.commit()
+
+    return jsonify({"message": "Choice updated successfully."}), 200
+
+@app.route("/down_transport_choice",methods=["POST"])
+@login_required
+def down_transport_choice():
+    data = request.get_json()
+    trip_id = data.get('trip_id')
+    if not trip_id:
+        return jsonify({"errors": {"trip": "trip_id is missing from request."}}), 400
+
+    # 2. Find the trip in the database
+    trip = db.session.get(Trip, trip_id)
+    trip.down_mode=data['down_mode']
+    trip.down_mode_id=data['down_mode_id']
+    db.session.commit()
+
     return jsonify({"message": "Choice updated successfully."}), 200
 
 
@@ -631,6 +663,8 @@ def hotel_choice():
     # 2. Find the trip in the database
     trip = db.session.get(Trip, trip_id)
     trip.hotel_id=data['hotel_id']
+    db.session.commit()
+
     return jsonify({"message": "Choice updated successfully."}), 200
 
 
@@ -649,4 +683,3 @@ if __name__ == "__main__":
     with app.app_context():
         db.create_all()
     app.run(debug=True, port=5000)
-

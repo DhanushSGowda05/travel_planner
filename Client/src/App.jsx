@@ -12,8 +12,11 @@ import PublicOnlyRoute from "./components/PublicOnlyRoute";
 
 import TripFormPage from "./pages/TripFormPage";
 import TransportSelectionPage from "./pages/TransportSelectionPage";
-import AccommodationSelectionPage from "./pages/AccommodationSelectionPage";
-import TripSummaryPage from "./pages/TripSummaryPage";
+
+import TripOptionPage from "./pages/TripOption.jsx";
+import AccommodationOptionPage from "./pages/AccommodationOptionPage";
+import HotelSelectionPage from "./pages/HotelSelectionPage";
+import ItineraryPage from "./pages/ItineraryPage";
 
 function App() {
   return (
@@ -41,16 +44,25 @@ function App() {
             <ProtectedRoute><TripFormPage /></ProtectedRoute>
           } />
 
-          <Route path="/trip/:tripId/transport" element={
+          <Route path="/transport-selection/:tripId" element={
             <ProtectedRoute><TransportSelectionPage /></ProtectedRoute>
           } />
 
-          <Route path="/trip/:tripId/accommodation" element={
-            <ProtectedRoute><AccommodationSelectionPage /></ProtectedRoute>
+          <Route path="/accommodation-option/:tripId" element={
+            <ProtectedRoute><AccommodationOptionPage /></ProtectedRoute>
+          } />
+          
+          <Route path="/hotel-selection/:tripId" element={
+            <ProtectedRoute><HotelSelectionPage /></ProtectedRoute>
           } />
 
-          <Route path="/trip/:tripId/summary" element={
-            <ProtectedRoute><TripSummaryPage /></ProtectedRoute>
+          
+          <Route path="/trip-options/:tripId" element={
+            <ProtectedRoute><TripOptionPage /></ProtectedRoute>
+          } />
+
+          <Route path="/trip-itinerary/:tripId" element={
+            <ItineraryPage />
           } />
 
         </Routes>

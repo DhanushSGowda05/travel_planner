@@ -3,277 +3,355 @@ import { useNavigate } from "react-router-dom";
 import { createTrip } from "../services/tripService";
 
 export default function TripFormPage() {
-    const navigate = useNavigate();
-    const [form, setForm] = useState({
-        origin_city: "",
-        destination_city: "",
-        start_date: "",
-        end_date: "",
-        budget_amount: "",
-        num_people: 1,
-        preferences: "",
-        dislikes: "",
-        mandatory_places: "",
-        food_preference: "",
-        pace: "mid",
-        needs_transport: true,
-        needs_accommodation: true,
-    });
+  const navigate = useNavigate();
+  const [loading, setLoading] = useState(false);
 
-    const [loading, setLoading] = useState(false);
+  // OPTIONS
+  const BUDGET_TYPES = ["Basic", "Economy", "Standard", "Premium", "Luxury"];
 
-    const onChange = (key) => (e) =>
-        setForm((s) => ({ ...s, [key]: e.target ? e.target.value : e }));
+  const PREFERENCES_LIST = [
+    "history",
+    "spiritual",
+    "museum",
+    "parks",
+    "wildlife",
+    "lakes",
+    "adventure",
+    "malls",
+    "markets",
+    "entertainment",
+    "trekking",
+    "sports",
+  ];
 
-    const handleSubmit = async (e) => {
-        e.preventDefault();
-        setLoading(true);
+  const [form, setForm] = useState({
+    origin_city: "",
+    destination_city: "",
+    start_date: "",
+    end_date: "",
+    budget_type: "",
+    budget_amount: "",
+    num_people: 1,
+    preferences: [],
+    mandatory_places: "",
+    food_preference: "Any",
+    pace: "mid", // low, mid, high → converts before sending
+  });
 
-        try {
-            const payload = {
-                origin_city: form.origin_city,
-                destination_city: form.destination_city,
-                start_date: form.start_date,
-                end_date: form.end_date,
+  // Toggle preference checkbox
+  const togglePreference = (pref) => {
+    setForm((prev) => ({
+      ...prev,
+      preferences: prev.preferences.includes(pref)
+        ? prev.preferences.filter((p) => p !== pref)
+        : [...prev.preferences, pref],
+    }));
+  };
 
-                budget_type: null,
-                budget_amount: form.budget_amount ? Number(form.budget_amount) : null,
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    setLoading(true);
 
-                num_people: Number(form.num_people),
+    try {
+      // AUTO-GENERATE DISLIKES
+      const dislikes = PREFERENCES_LIST.filter(
+        (item) => !form.preferences.includes(item)
+      );
 
-                preferences: form.preferences
-                    ? form.preferences.split(",").map((s) => s.trim())
-                    : [],
+      const payload = {
+        origin_city: form.origin_city,
+        destination_city: form.destination_city,
+        start_date: form.start_date,
+        end_date: form.end_date,
 
-                dislikes: form.dislikes
-                    ? form.dislikes.split(",").map((s) => s.trim())
-                    : [],
+        budget_type: form.budget_type,
+        budget_amount: form.budget_amount
+          ? Number(form.budget_amount)
+          : null,
 
-                mandatory_places: form.mandatory_places
-                    ? form.mandatory_places.split(",").map((s) => s.trim())
-                    : [],
+        num_people: Number(form.num_people),
+        preferences: form.preferences,
+        dislikes: dislikes,
 
-                food_preference: form.food_preference || "Any",
+        mandatory_places: form.mandatory_places
+          ? form.mandatory_places.split(",").map((s) => s.trim())
+          : [],
 
-                pace:
-                    form.pace === "low"
-                        ? "Relaxed"
-                        : form.pace === "mid"
-                            ? "Moderate"
-                            : "Fast-Paced",
-            };
+        food_preference: form.food_preference,
 
-            const data = await createTrip(payload);
+        pace:
+          form.pace === "low"
+            ? "Relaxed"
+            : form.pace === "mid"
+            ? "Moderate"
+            : "Fast-Paced",
+      };
 
-            const tripId = data.trip_id ?? data.id;
-            if (!tripId) throw new Error("No trip ID returned");
+      const data = await createTrip(payload);
+      const tripId = data.trip_id ?? data.id;
 
-            if (form.needs_transport) {
-                navigate(`/trip/${tripId}/transport`);
-            } else if (form.needs_accommodation) {
-                navigate(`/trip/${tripId}/accommodation`);
-            } else {
-                navigate(`/trip/${tripId}/summary`);
-            }
-        } catch (err) {
-            console.error(err);
-            alert(err.message || "Failed to create trip");
-        } finally {
-            setLoading(false);
-        }
-    };
+      if (!tripId) throw new Error("Trip ID missing from response");
 
-    return (
-        <div className="max-w-4xl bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 mx-auto p-6">
-            <div className="mb-8 text-center">
-                <h1 className="text-3xl font-extrabold text-slate-900">Plan a New Trip</h1>
-                <p className="text-slate-500 mt-2">Fill in the details and we'll help build your perfect itinerary.</p>
+      navigate(`/trip-options/${tripId}`);
+    } catch (err) {
+      console.error(err);
+      alert(err.message || "Failed to create trip");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="max-w-4xl bg-gradient-to-br from-slate-50 via-blue-50 to-indigo-50 mx-auto p-6">
+
+      {/* Title */}
+      <div className="mb-8 text-center">
+        <h1 className="text-3xl font-extrabold text-slate-900">Plan a New Trip</h1>
+        <p className="text-slate-500 mt-2">
+          Fill in the details and we'll help build your perfect itinerary.
+        </p>
+      </div>
+
+      {/* FORM */}
+      <form
+        onSubmit={handleSubmit}
+        className="bg-white shadow-lg rounded-xl p-8 space-y-8 border border-slate-200"
+      >
+
+        {/* SECTION 1: DESTINATIONS */}
+        <section>
+          <h2 className="text-xl font-semibold text-slate-800 mb-4">📍 Destinations</h2>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+            {/* ORIGIN */}
+            <div>
+              <label className="text-sm font-medium text-slate-700">Origin City</label>
+              <input
+                required
+                value={form.origin_city}
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, origin_city: e.target.value }))
+                }
+                placeholder="e.g. Bengaluru"
+                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
+              />
             </div>
 
-            <form
-                onSubmit={handleSubmit}
-                className="bg-white shadow-lg rounded-xl p-8 space-y-8 border border-slate-200"
-            >
-                {/* SECTION 1 */}
-                <div>
-                    <h2 className="text-xl font-semibold text-slate-800 mb-4">📍 Destinations</h2>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                        <div>
-                            <label className="text-sm font-medium text-slate-700">Origin City</label>
-                            <input
-                                required
-                                value={form.origin_city}
-                                onChange={onChange("origin_city")}
-                                placeholder="e.g. Bengaluru"
-                                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-cyan-500"
-                            />
-                        </div>
+            {/* DESTINATION */}
+            <div>
+              <label className="text-sm font-medium text-slate-700">Destination City</label>
+              <input
+                required
+                value={form.destination_city}
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, destination_city: e.target.value }))
+                }
+                placeholder="e.g. Goa"
+                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
+              />
+            </div>
+          </div>
+        </section>
 
-                        <div>
-                            <label className="text-sm font-medium text-slate-700">Destination City</label>
-                            <input
-                                required
-                                value={form.destination_city}
-                                onChange={onChange("destination_city")}
-                                placeholder="e.g. Goa"
-                                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-cyan-500"
-                            />
-                        </div>
-                    </div>
-                </div>
+        <hr className="border-slate-200" />
 
-                <hr className="border-slate-200" />
+        {/* SECTION 2: DATES */}
+        <section>
+          <h2 className="text-xl font-semibold text-slate-800 mb-4">📅 Trip Dates</h2>
 
-                {/* SECTION 2 */}
-                <div>
-                    <h2 className="text-xl font-semibold text-slate-800 mb-4">📅 Trip Dates</h2>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-                        <div>
-                            <label className="text-sm font-medium text-slate-700">Start Date</label>
-                            <input
-                                required
-                                type="date"
-                                value={form.start_date}
-                                onChange={onChange("start_date")}
-                                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-cyan-500"
-                            />
-                        </div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+            {/* START DATE */}
+            <div>
+              <label className="text-sm font-medium text-slate-700">Start Date</label>
+              <input
+                required
+                type="date"
+                value={form.start_date}
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, start_date: e.target.value }))
+                }
+                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
+              />
+            </div>
 
-                        <div>
-                            <label className="text-sm font-medium text-slate-700">End Date</label>
-                            <input
-                                required
-                                type="date"
-                                value={form.end_date}
-                                onChange={onChange("end_date")}
-                                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-cyan-500"
-                            />
-                        </div>
-                    </div>
-                </div>
+            {/* END DATE */}
+            <div>
+              <label className="text-sm font-medium text-slate-700">End Date</label>
+              <input
+                required
+                type="date"
+                value={form.end_date}
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, end_date: e.target.value }))
+                }
+                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
+              />
+            </div>
+          </div>
+        </section>
 
-                <hr className="border-slate-200" />
+        <hr className="border-slate-200" />
 
-                {/* SECTION 3 */}
-                <div>
-                    <h2 className="text-xl font-semibold text-slate-800 mb-4">💵 Budget & Group</h2>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-                        <div>
-                            <label className="text-sm font-medium text-slate-700">Travellers</label>
-                            <input
-                                type="number"
-                                min={1}
-                                value={form.num_people}
-                                onChange={(e) =>
-                                    setForm((s) => ({ ...s, num_people: Number(e.target.value) }))
-                                }
-                                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-cyan-500"
-                            />
-                        </div>
+        {/* SECTION 3: BUDGET + PEOPLE + PACE */}
+        <section>
+          <h2 className="text-xl font-semibold text-slate-800 mb-4">💵 Budget & Group</h2>
 
-                        <div>
-                            <label className="text-sm font-medium text-slate-700">Pace</label>
-                            <select
-                                value={form.pace}
-                                onChange={onChange("pace")}
-                                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-cyan-500"
-                            >
-                                <option value="low">Relaxed</option>
-                                <option value="mid">Moderate</option>
-                                <option value="high">Fast-Paced</option>
-                            </select>
-                        </div>
+          <div className="grid grid-cols-1 sm:grid-cols-4 gap-6">
 
-                        <div>
-                            <label className="text-sm font-medium text-slate-700">Budget Amount</label>
-                            <input
-                                value={form.budget_amount}
-                                onChange={onChange("budget_amount")}
-                                placeholder="₹ Amount"
-                                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-cyan-500"
-                            />
-                        </div>
-                    </div>
-                </div>
+            {/* BUDGET TYPE */}
+            <div>
+              <label className="text-sm font-medium text-slate-700">Budget Type</label>
+              <select
+                required
+                value={form.budget_type}
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, budget_type: e.target.value }))
+                }
+                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
+              >
+                <option value="">Select...</option>
+                {BUDGET_TYPES.map((b) => (
+                  <option key={b} value={b}>{b}</option>
+                ))}
+              </select>
+            </div>
 
-                <hr className="border-slate-200" />
+            {/* TRAVELLERS */}
+            <div>
+              <label className="text-sm font-medium text-slate-700">Travellers</label>
+              <input
+                type="number"
+                min={1}
+                value={form.num_people}
+                onChange={(e) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    num_people: Number(e.target.value),
+                  }))
+                }
+                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
+              />
+            </div>
 
-                {/* SECTION 4 */}
-                <div>
-                    <h2 className="text-xl font-semibold text-slate-800 mb-4">🎒 Preferences</h2>
-                    <div className="space-y-4">
-                        <div>
-                            <label className="text-sm font-medium text-slate-700">Preferences</label>
-                            <textarea
-                                value={form.preferences}
-                                onChange={onChange("preferences")}
-                                placeholder="e.g. beaches, museums, adventure"
-                                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-cyan-500"
-                            />
-                        </div>
+            {/* BUDGET AMOUNT */}
+            <div>
+              <label className="text-sm font-medium text-slate-700">Budget Amount</label>
+              <input
+                type="number"
+                value={form.budget_amount}
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, budget_amount: e.target.value }))
+                }
+                placeholder="₹ Amount"
+                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
+              />
+            </div>
 
-                        <div>
-                            <label className="text-sm font-medium text-slate-700">Dislikes</label>
-                            <textarea
-                                value={form.dislikes}
-                                onChange={onChange("dislikes")}
-                                placeholder="e.g. crowded places, long walks"
-                                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-cyan-500"
-                            />
-                        </div>
+            {/* PACE */}
+            <div>
+              <label className="text-sm font-medium text-slate-700">Pace</label>
+              <select
+                value={form.pace}
+                onChange={(e) =>
+                  setForm((prev) => ({ ...prev, pace: e.target.value }))
+                }
+                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
+              >
+                <option value="low">Relaxed</option>
+                <option value="mid">Moderate</option>
+                <option value="high">Fast-Paced</option>
+              </select>
+            </div>
+          </div>
+        </section>
 
-                        <div>
-                            <label className="text-sm font-medium text-slate-700">Mandatory Places</label>
-                            <input
-                                value={form.mandatory_places}
-                                onChange={onChange("mandatory_places")}
-                                placeholder="e.g. Taj Mahal, Marine Drive"
-                                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg focus:ring-2 focus:ring-cyan-500"
-                            />
-                        </div>
-                    </div>
-                </div>
+        <hr className="border-slate-200" />
 
-                <hr className="border-slate-200" />
+        {/* SECTION 4: PREFERENCES */}
+        <section>
+          <h2 className="text-xl font-semibold text-slate-800 mb-4">🎒 Preferences</h2>
 
-                {/* SECTION 5 */}
-                <div className="flex items-center gap-8">
-                    <label className="flex items-center gap-3">
-                        <input
-                            type="checkbox"
-                            checked={form.needs_transport}
-                            onChange={(e) =>
-                                setForm((s) => ({ ...s, needs_transport: e.target.checked }))
-                            }
-                            className="h-4 w-4"
-                        />
-                        <span className="text-slate-700">Add Transport</span>
-                    </label>
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+            {PREFERENCES_LIST.map((pref) => (
+              <label key={pref} className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  checked={form.preferences.includes(pref)}
+                  onChange={() => togglePreference(pref)}
+                />
+                <span className="capitalize">{pref}</span>
+              </label>
+            ))}
+          </div>
 
-                    <label className="flex items-center gap-3">
-                        <input
-                            type="checkbox"
-                            checked={form.needs_accommodation}
-                            onChange={(e) =>
-                                setForm((s) => ({ ...s, needs_accommodation: e.target.checked }))
-                            }
-                            className="h-4 w-4"
-                        />
-                        <span className="text-slate-700">Add Accommodation</span>
-                    </label>
-                </div>
+          {/* MANDATORY PLACES */}
+          <div className="mt-5">
+            <label className="text-sm font-medium text-slate-700">Mandatory Places</label>
+            <input
+              value={form.mandatory_places}
+              onChange={(e) =>
+                setForm((prev) => ({ ...prev, mandatory_places: e.target.value }))
+              }
+              placeholder="e.g. Taj Mahal, Marine Drive"
+              className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
+            />
+          </div>
+        </section>
 
-                {/* SUBMIT */}
-                <div className="flex justify-end">
-                    <button
-                        type="submit"
-                        disabled={loading}
-                        className="bg-cyan-600 text-white px-6 py-2 rounded-lg text-lg shadow hover:bg-cyan-700 transition disabled:opacity-60"
-                    >
-                        {loading ? "Creating..." : "Next →"}
-                    </button>
-                </div>
-            </form>
+        <hr className="border-slate-200" />
+
+        {/* SECTION 5: FOOD */}
+        <section>
+          <h2 className="text-xl font-semibold text-slate-800 mb-4">🍽️ Food Preference</h2>
+
+          <div className="space-y-2">
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="food"
+                value="Veg-Only"
+                checked={form.food_preference === "Veg-Only"}
+                onChange={(e) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    food_preference: e.target.value,
+                  }))
+                }
+              />
+              Veg-Only
+            </label>
+
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                name="food"
+                value="Any"
+                checked={form.food_preference === "Any"}
+                onChange={(e) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    food_preference: e.target.value,
+                  }))
+                }
+              />
+              Any
+            </label>
+          </div>
+        </section>
+
+        <hr className="border-slate-200" />
+
+        {/* SUBMIT */}
+        <div className="flex justify-end">
+          <button
+            type="submit"
+            disabled={loading}
+            className="bg-cyan-600 text-white px-6 py-2 rounded-lg text-lg shadow hover:bg-cyan-700 disabled:opacity-60"
+          >
+            {loading ? "Creating..." : "Next →"}
+          </button>
         </div>
-    );
+      </form>
+    </div>
+  );
 }
