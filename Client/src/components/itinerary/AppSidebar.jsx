@@ -32,10 +32,12 @@ export default function AppSidebar({
         { id: "places", label: "Places to visit" },
       ],
     },
+
     {
       id: "itinerary",
       label: "Itinerary",
       icon: Calendar,
+
       items: days.map((day) => {
         const d = new Date(day.date);
         const label = d.toLocaleDateString("en-US", {
@@ -44,17 +46,19 @@ export default function AppSidebar({
           day: "numeric",
         });
 
+        // FIXED PREVIEW TO AVOID split() ERRORS
         const preview =
           day.places.length > 0
             ? day.places
                 .slice(0, 2)
-                .map((p) => p.name.split(" ")[0])
+                .map((p) => (p?.name || "Place").split(" ")[0])
                 .join(" • ") + (day.places.length > 2 ? " ..." : "")
             : "";
 
         return { id: day.id, label, sublabel: preview };
       }),
     },
+
     {
       id: "budget",
       label: "Budget",
@@ -65,20 +69,17 @@ export default function AppSidebar({
 
   const toggleSection = (id) => {
     setExpandedSections((prev) =>
-      prev.includes(id)
-        ? prev.filter((x) => x !== id)
-        : [...prev, id]
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     );
   };
 
-  /* ---------------------------------------
-     COLLAPSED SIDEBAR (icon-only)
-  ---------------------------------------- */
+  /* ---------------------------------------------
+      COLLAPSED SIDEBAR
+  --------------------------------------------- */
   if (!isOpen) {
     return (
       <div className="w-14 h-full bg-white border-r flex flex-col items-center py-4 gap-6">
-
-        {/* Click logo to expand */}
+        {/* Logo / Expand button */}
         <button
           onClick={onToggle}
           className="flex flex-col items-center gap-1 hover:bg-gray-100 p-2 rounded-lg"
@@ -98,12 +99,11 @@ export default function AppSidebar({
     );
   }
 
-  /* ---------------------------------------
-     EXPANDED SIDEBAR
-  ---------------------------------------- */
+  /* ---------------------------------------------
+      EXPANDED SIDEBAR
+  --------------------------------------------- */
   return (
     <div className="w-60 h-full bg-white border-r flex flex-col">
-
       {/* Header / Logo */}
       <div className="flex items-center gap-3 px-4 py-4 border-b">
         <button onClick={onToggle}>
@@ -112,13 +112,11 @@ export default function AppSidebar({
         <span className="text-xl font-semibold tracking-tight">TripCraft</span>
       </div>
 
-      {/* Main Navigation */}
+      {/* Navigation */}
       <nav className="flex-1 overflow-y-auto px-3 py-4 space-y-3">
-
         {sections.map((section) => (
           <div key={section.id}>
-            
-            {/* Section header */}
+            {/* Section Header */}
             <button
               onClick={() => toggleSection(section.id)}
               className="w-full flex items-center gap-2 px-2 py-2 rounded-md hover:bg-gray-100 transition"
@@ -133,7 +131,7 @@ export default function AppSidebar({
               <span className="text-sm font-medium">{section.label}</span>
             </button>
 
-            {/* Items inside section */}
+            {/* Section Items */}
             {expandedSections.includes(section.id) && (
               <div className="ml-6 mt-1 space-y-1">
                 {section.items.map((item) => (
@@ -151,6 +149,7 @@ export default function AppSidebar({
                     `}
                   >
                     <div className="truncate">{item.label}</div>
+
                     {item.sublabel && (
                       <div className="text-xs text-gray-500 truncate">
                         {item.sublabel}
@@ -160,13 +159,11 @@ export default function AppSidebar({
                 ))}
               </div>
             )}
-
           </div>
         ))}
-
       </nav>
 
-      {/* Collapse button */}
+      {/* Collapse Button */}
       <div className="p-3 border-t">
         <button
           onClick={onToggle}

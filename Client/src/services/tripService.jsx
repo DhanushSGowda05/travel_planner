@@ -10,12 +10,13 @@ export async function createTrip(payload) {
     credentials: "include",
     body: JSON.stringify(payload),
   });
+
   if (!res.ok) throw new Error("Failed to create trip");
   return res.json();
 }
 
 /* -----------------------------------------------------
-   UPDATE TRANSPORT NEED + TYPE (Basic/Economy/etc)
+   UPDATE TRANSPORT NEED + TYPE
 ----------------------------------------------------- */
 export async function updateTransport(payload) {
   const res = await fetch(`${BASE}/update_transport`, {
@@ -24,13 +25,14 @@ export async function updateTransport(payload) {
     credentials: "include",
     body: JSON.stringify(payload),
   });
+
   if (!res.ok) throw new Error("Failed to update transport");
   return res.json();
 }
 
 /* -----------------------------------------------------
-   FETCH TRANSPORT OPTIONS (arrival/departure)
-   BACKEND expects:  { trip_id, u_d: "u" | "d" }
+   FETCH TRANSPORT OPTIONS
+   BACKEND expects: { trip_id, u_d: "u" | "d" }
 ----------------------------------------------------- */
 export async function getTransportOptions(payload) {
   const res = await fetch(`${BASE}/transport_option`, {
@@ -39,13 +41,13 @@ export async function getTransportOptions(payload) {
     credentials: "include",
     body: JSON.stringify(payload),
   });
+
   if (!res.ok) throw new Error("Failed to fetch transport options");
   return res.json();
 }
 
 /* -----------------------------------------------------
-   SAVE ARRIVAL TRANSPORT CHOICE (UP MODE)
-   BACKEND expects: { trip_id, up_mode, up_mode_id }
+   SAVE ARRIVAL TRANSPORT CHOICE (UP)
 ----------------------------------------------------- */
 export async function postUpTransportChoice(payload) {
   const res = await fetch(`${BASE}/up_transport_choice`, {
@@ -54,13 +56,13 @@ export async function postUpTransportChoice(payload) {
     credentials: "include",
     body: JSON.stringify(payload),
   });
+
   if (!res.ok) throw new Error("Failed to save arrival transport");
   return res.json();
 }
 
 /* -----------------------------------------------------
-   SAVE DEPARTURE TRANSPORT CHOICE (DOWN MODE)
-   BACKEND expects: { trip_id, down_mode, down_mode_id }
+   SAVE DEPARTURE TRANSPORT CHOICE (DOWN)
 ----------------------------------------------------- */
 export async function postDownTransportChoice(payload) {
   const res = await fetch(`${BASE}/down_transport_choice`, {
@@ -69,6 +71,7 @@ export async function postDownTransportChoice(payload) {
     credentials: "include",
     body: JSON.stringify(payload),
   });
+
   if (!res.ok) throw new Error("Failed to save departure transport");
   return res.json();
 }
@@ -77,12 +80,16 @@ export async function postDownTransportChoice(payload) {
    GET TRIP (fallback to list_trips)
 ----------------------------------------------------- */
 export async function getTrip(tripId) {
-  let res = await fetch(`${BASE}/trip/${tripId}`, { credentials: "include" });
+  let res = await fetch(`${BASE}/trip/${tripId}`, {
+    credentials: "include",
+  });
 
   if (res.ok) return res.json();
 
-  // FIXED ROUTE HERE (this was the CORS issue)
-  res = await fetch(`${BASE}/list_trips`, { credentials: "include" });
+  // Fallback
+  res = await fetch(`${BASE}/list_trips`, {
+    credentials: "include",
+  });
 
   if (!res.ok) throw new Error("Failed to fetch trip");
 
@@ -91,7 +98,7 @@ export async function getTrip(tripId) {
 }
 
 /* -----------------------------------------------------
-   UPDATE ACCOMMODATION NEED / TYPE / LOCATION
+   UPDATE ACCOMMODATION
 ----------------------------------------------------- */
 export async function updateAccommodation(payload) {
   const res = await fetch(`${BASE}/update_accomodation`, {
@@ -100,26 +107,13 @@ export async function updateAccommodation(payload) {
     credentials: "include",
     body: JSON.stringify(payload),
   });
+
   if (!res.ok) throw new Error("Failed to update accommodation");
   return res.json();
 }
 
 /* -----------------------------------------------------
-   SAVE HOTEL CHOICE
------------------------------------------------------ */
-export async function postHotelChoice(payload) {
-  const res = await fetch(`${BASE}/hotel_choice`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    credentials: "include",
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error("Failed to save hotel choice");
-  return res.json();
-}
-
-/* -----------------------------------------------------
-   OPTIONAL: FETCH HOTEL OPTIONS
+   FETCH HOTEL OPTIONS
 ----------------------------------------------------- */
 export async function getHotelOptions(payload) {
   const res = await fetch(`${BASE}/hotel_option`, {
@@ -132,7 +126,25 @@ export async function getHotelOptions(payload) {
   if (!res.ok) throw new Error("Failed to fetch hotels");
   return res.json();
 }
-//DELETE TRIP
+
+/* -----------------------------------------------------
+   SAVE HOTEL CHOICE
+----------------------------------------------------- */
+export async function chooseHotel(payload) {
+  const res = await fetch(`${BASE}/hotel_choice`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) throw new Error("Failed to save hotel choice");
+  return res.json();
+}
+
+/* -----------------------------------------------------
+   DELETE TRIP
+----------------------------------------------------- */
 export async function deleteTrip(payload) {
   const res = await fetch(`${BASE}/delete_trip`, {
     method: "POST",
@@ -144,4 +156,18 @@ export async function deleteTrip(payload) {
   if (!res.ok) throw new Error("Failed to delete trip");
   return res.json();
 }
+/* -----------------------------------------------------
+   RUN ILP SOLVER (GENERATE ITINERARY)
+   BACKEND expects: { trip_id }
+----------------------------------------------------- */
+export async function runIlpSolver(payload) {
+  const res = await fetch(`${BASE}/ilp_solver`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify(payload),
+  });
 
+  if (!res.ok) throw new Error("Failed to generate itinerary");
+  return res.json();
+}

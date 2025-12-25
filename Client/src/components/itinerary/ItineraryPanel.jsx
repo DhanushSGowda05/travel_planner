@@ -26,7 +26,7 @@ export default function ItineraryPanel({
     <div className="h-full flex flex-col bg-white border-r">
 
       {/* -------------------- TOP BAR -------------------- */}
-      <div className="flex items-center justify-between px-4 py-3 border-b bg-white shadow-sm">
+      <div className="flex items-center justify-between px-4 py-3 border-b bg-white shadow-sm pb-2.5">
 
         {/* Left side: logo + trip name */}
         <div className="flex items-center gap-3">

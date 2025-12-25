@@ -48,21 +48,23 @@ function App() {
             <ProtectedRoute><TransportSelectionPage /></ProtectedRoute>
           } />
 
-          <Route path="/accommodation-option/:tripId" element={
-            <ProtectedRoute><AccommodationOptionPage /></ProtectedRoute>
-          } />
-          
-          <Route path="/hotel-selection/:tripId" element={
-            <ProtectedRoute><HotelSelectionPage /></ProtectedRoute>
-          } />
+          <Route
+            path="/accommodation-option/:tripId"
+            element={<ProtectedRoute><AccommodationOptionPage /></ProtectedRoute>}
+          />
 
-          
+          <Route
+            path="/hotel-selection/:tripId"
+            element={<ProtectedRoute><HotelSelectionPage /></ProtectedRoute>}
+          />
+
+
           <Route path="/trip-options/:tripId" element={
             <ProtectedRoute><TripOptionPage /></ProtectedRoute>
           } />
 
           <Route path="/trip-itinerary/:tripId" element={
-            <ItineraryPage />
+            <ProtectedRoute><ItineraryPage /></ProtectedRoute>
           } />
 
         </Routes>

@@ -13,9 +13,11 @@ export default function DaySection({
   onAddPlace,
 }) {
   const [isExpanded, setIsExpanded] = useState(true);
-
   const cardRefs = useRef({});
 
+  /* -----------------------------------
+     Auto-scroll to selected item
+  ----------------------------------- */
   useEffect(() => {
     if (!selectedPlaceId) return;
 
@@ -23,15 +25,14 @@ export default function DaySection({
 
     const el = cardRefs.current[selectedPlaceId];
     if (el) {
-      el.scrollIntoView({
-        behavior: "smooth",
-        block: "center",
-      });
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
     }
   }, [selectedPlaceId]);
 
-  const dateObj = new Date(day.date);
-  const formattedDate = dateObj.toLocaleDateString("en-US", {
+  /* -----------------------------------
+     Format date
+  ----------------------------------- */
+  const formattedDate = new Date(day.date).toLocaleDateString("en-US", {
     weekday: "long",
     month: "long",
     day: "numeric",
@@ -52,34 +53,77 @@ export default function DaySection({
             <ChevronRight className="w-5 h-5 text-gray-500" />
           )}
 
-          <h2 className="font-semibold text-lg text-gray-900">{formattedDate}</h2>
+          <h2 className="font-semibold text-lg text-gray-900">
+            {formattedDate}
+          </h2>
         </div>
-
-        <div></div>
       </div>
 
       {/* CONTENT */}
       {isExpanded && (
         <div className="px-4 pb-4 relative overflow-visible z-10">
 
-          {/* PLACE CARDS */}
+          {/* TIMELINE CARDS */}
           {day.places.length > 0 ? (
             <div className="space-y-4 mb-6">
-              {day.places.map((place, index) => (
-                <div
-                  key={place.id}
-                  ref={(el) => (cardRefs.current[place.id] = el)}
-                >
-                  <PlaceCard
-                    place={place}
-                    index={index}
-                    isSelected={selectedPlaceId === place.id}
-                    isEditMode={isEditMode}
-                    onSelect={() => onSelectPlace(place)}
-                    onDelete={() => onDeletePlace?.(place.id)}
-                  />
-                </div>
-              ))}
+              {day.places.map((item, index) => {
+                const isMeal = item.type === "meal";
+
+                return (
+                  <div
+                    key={item.id}
+                    ref={(el) => (cardRefs.current[item.id] = el)}
+                  >
+                    {/* ---------- MEAL CARD ---------- */}
+                    {isMeal ? (
+                      <div
+                        onClick={() => onSelectPlace(item.id)}
+                        className={`
+                          cursor-pointer rounded-xl border p-4 transition
+                          ${
+                            selectedPlaceId === item.id
+                              ? "ring-2 ring-orange-400 border-orange-400"
+                              : "border-orange-300"
+                          }
+                          bg-orange-50
+                        `}
+                      >
+                        <div className="flex items-center gap-3 mb-1">
+                          <div className="w-8 h-8 rounded-full bg-orange-500 text-white flex items-center justify-center font-semibold">
+                            🍴
+                          </div>
+
+                          <h3 className="font-semibold text-gray-900">
+                            {item.name}
+                          </h3>
+
+                          <span className="ml-auto text-xs px-2 py-1 rounded-full bg-orange-200 text-orange-800">
+                            Food
+                          </span>
+                        </div>
+
+                        <p className="text-sm text-gray-600">
+                          {item.description || "Time for food and rest."}
+                        </p>
+
+                        <div className="mt-2 text-sm text-gray-500">
+                          {item.start_time} · {item.duration || "Break"}
+                        </div>
+                      </div>
+                    ) : (
+                      /* ---------- NORMAL PLACE CARD ---------- */
+                      <PlaceCard
+                        place={item}
+                        index={index}
+                        isSelected={selectedPlaceId === item.id}
+                        isEditMode={isEditMode}
+                        onSelect={() => onSelectPlace(item)}
+                        onDelete={() => onDeletePlace?.(item.id)}
+                      />
+                    )}
+                  </div>
+                );
+              })}
             </div>
           ) : (
             <div className="text-center py-8 text-gray-500">
@@ -90,12 +134,12 @@ export default function DaySection({
 
           {/* ADD PLACE INPUT */}
           {isEditMode && (
-            <div className="relative mb-63 z-30">
-              <AddPlaceInput onAdd={(placeObj) => onAddPlace(day.id, placeObj)} />
-
+            <div className="relative z-30">
+              <AddPlaceInput
+                onAdd={(placeObj) => onAddPlace(day.id, placeObj)}
+              />
             </div>
           )}
-
         </div>
       )}
     </div>

@@ -1,128 +1,186 @@
-import React, { useEffect, useState } from "react";
-import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { postHotelChoice } from "../services/tripService";
+import { useEffect, useState } from "react";
+import { useNavigate, useParams } from "react-router-dom";
+import { Card, CardContent } from "../components/ui/card";
+import { Button } from "../components/ui/button";
+import { Badge } from "../components/ui/badge";
+import { Input } from "../components/ui/input";
+
+import {
+  MapPin,
+  Search,
+  ArrowLeft,
+  Check,
+  ChevronRight
+} from "lucide-react";
+import { getHotelOptions, chooseHotel } from "../services/tripService";
 
 export default function HotelSelectionPage() {
-    const { tripId } = useParams();
-    const navigate = useNavigate();
-    const location = useLocation();
+  const { tripId } = useParams();
+  const navigate = useNavigate();
 
-    const accommodationType = location.state?.accommodation_type;
-    const accLoc = location.state?.acc_loc;
+  const [hotels, setHotels] = useState([]);
+  const [selectedHotel, setSelectedHotel] = useState(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
-    const [hotels, setHotels] = useState([]);
-    const [selectedHotel, setSelectedHotel] = useState(null);
+  useEffect(() => {
+    async function fetchHotels() {
+      try {
+        const res = await getHotelOptions({ trip_id: tripId });
+        setHotels(res.hotels || []);
+      } catch (err) {
+        setError("Failed to load hotels");
+      } finally {
+        setLoading(false);
+      }
+    }
+    fetchHotels();
+  }, [tripId]);
 
-    // Simulate backend fetch
-    useEffect(() => {
-        fetchHotels();
-    }, []);
+  const filteredHotels = hotels.filter(
+    (h) =>
+      h.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      h.address.toLowerCase().includes(searchQuery.toLowerCase())
+  );
 
-    const fetchHotels = async () => {
-        // Replace this with real API when backend ready
-        const dummyHotels = [
-            {
-                hotel_id: "HT-1001",
-                hotel_name: "Ocean View Resort",
-                rating: 4.4,
-                price_per_night: 2200,
-                location: "Near Panambur Beach",
-                amenities: ["WiFi", "Breakfast", "Pool"],
-                distance_from_center_km: 2.5,
-                type: "Premium"
-            },
-            {
-                hotel_id: "HT-1002",
-                hotel_name: "City Comfort Inn",
-                rating: 4.0,
-                price_per_night: 1500,
-                location: "City Center",
-                amenities: ["WiFi", "Parking"],
-                distance_from_center_km: 0.8,
-                type: "Standard"
-            },
-            {
-                hotel_id: "HT-1003",
-                hotel_name: "Luxury Palace Hotel",
-                rating: 4.7,
-                price_per_night: 3800,
-                location: "Kadri Hills",
-                amenities: ["WiFi", "Spa", "Gym"],
-                distance_from_center_km: 3.1,
-                type: "Luxury"
-            }
-        ];
+  const handleContinue = async () => {
+    if (!selectedHotel) {
+      alert("Please select a hotel");
+      return;
+    }
 
-        // Filter by accommodationType
-        setHotels(dummyHotels.filter(h => h.type === accommodationType));
-    };
+    await chooseHotel({
+      trip_id: tripId,
+      hotel_name: selectedHotel.name,
+      hotel_address: selectedHotel.address,
+      hotel_lat: selectedHotel.lat,
+      hotel_long: selectedHotel.long,
+      hotel_price: selectedHotel.price
+    });
 
-    const handleNext = async () => {
-        if (!selectedHotel) {
-            alert("Please select a hotel.");
-            return;
-        }
+    navigate(`/trip-itinerary/${tripId}`);
+  };
 
-        try {
-            await postHotelChoice({
-                trip_id: tripId,
-                hotel_id: selectedHotel
-            });
+  if (loading) return <p className="p-6">Loading hotels...</p>;
+  if (error) return <p className="p-6 text-red-500">{error}</p>;
 
-            navigate(`/itinerary/${tripId}`);
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
+      {/* Header */}
+      <div className="bg-white shadow-sm border-b sticky top-0 z-10">
+        <div className="max-w-7xl mx-auto px-6 py-4">
+          <div className="flex items-center justify-between mb-4">
+            <Button variant="ghost" onClick={() => navigate(-1)}>
+              <ArrowLeft className="w-4 h-4 mr-2" />
+              Back
+            </Button>
 
-        } catch (err) {
-            console.error(err);
-            alert("Failed to save hotel choice");
-        }
-    };
-
-    const HotelCard = ({ hotel }) => {
-        const isSelected = selectedHotel === hotel.hotel_id;
-
-        return (
-            <div
-                onClick={() => setSelectedHotel(hotel.hotel_id)}
-                className={`p-4 border rounded-lg cursor-pointer shadow-sm transition 
-                    ${isSelected ? "border-cyan-600 bg-cyan-50" : "border-slate-300 bg-white"}`}
-            >
-                <h3 className="text-xl font-semibold">{hotel.hotel_name}</h3>
-                <p className="text-slate-700">⭐ {hotel.rating}</p>
-                <p className="text-slate-700">
-                    <strong>Price:</strong> ₹{hotel.price_per_night} / night
-                </p>
-                <p className="text-slate-700">
-                    <strong>Location:</strong> {hotel.location}
-                </p>
-                <p className="text-slate-700">
-                    <strong>Amenities:</strong> {hotel.amenities.join(", ")}
-                </p>
-            </div>
-        );
-    };
-
-    return (
-        <div className="max-w-4xl mx-auto p-6 bg-gradient-to-br from-slate-50 to-blue-50 rounded-xl shadow">
-
-            <h1 className="text-3xl font-bold text-center mb-6">
-                Select Your Hotel
-            </h1>
-
-            {/* HOTEL CARDS */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mt-6">
-                {hotels.map(hotel => (
-                    <HotelCard key={hotel.hotel_id} hotel={hotel} />
-                ))}
+            <div className="text-center flex-1">
+              <h1 className="text-3xl">Select Your Hotel</h1>
+              <p className="text-gray-600 text-sm mt-1">
+                {filteredHotels.length} hotels available
+              </p>
             </div>
 
-            <div className="flex justify-end mt-10">
-                <button
-                    onClick={handleNext}
-                    className="bg-cyan-600 text-white px-6 py-2 rounded-lg text-lg shadow hover:bg-cyan-700 transition"
-                >
-                    Next →
-                </button>
-            </div>
+            <div className="w-24" />
+          </div>
+
+          {/* Search */}
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-gray-400" />
+            <Input
+              type="text"
+              placeholder="Search hotels by name or location..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-11 h-12 border-gray-300"
+            />
+          </div>
         </div>
-    );
+      </div>
+
+      {/* Hotel Grid */}
+      <div className="max-w-7xl mx-auto px-6 py-8 pb-24">
+        {filteredHotels.length === 0 ? (
+          <p className="text-center text-gray-500">No hotels found</p>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {filteredHotels.map((hotel) => (
+              <Card
+                key={hotel.id}
+                className={`cursor-pointer transition-all duration-200 ${
+                  selectedHotel?.id === hotel.id
+                    ? "ring-4 ring-teal-500 shadow-xl"
+                    : "border-2 border-gray-200 hover:shadow-lg"
+                }`}
+                onClick={() => setSelectedHotel(hotel)}
+              >
+                <CardContent className="p-5 flex flex-col h-full">
+                  <h3 className="text-xl mb-2">{hotel.name}</h3>
+
+                  <div className="flex items-center gap-2 text-sm text-gray-600 mb-4">
+                    <MapPin className="w-4 h-4" />
+                    <span className="line-clamp-2">{hotel.address}</span>
+                  </div>
+
+                  <div className="mt-auto flex justify-between items-end pt-4 border-t">
+                    <div>
+                      <p className="text-2xl text-teal-600">
+                        {hotel.currency} {hotel.price}
+                      </p>
+                      <p className="text-xs text-gray-500">per night</p>
+                    </div>
+
+                    <Button
+                      size="sm"
+                      variant={selectedHotel?.id === hotel.id ? "default" : "outline"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedHotel(hotel);
+                      }}
+                      className={
+                        selectedHotel?.id === hotel.id
+                          ? "bg-teal-500 hover:bg-teal-600"
+                          : ""
+                      }
+                    >
+                      {selectedHotel?.id === hotel.id ? "Selected" : "Select"}
+                    </Button>
+                  </div>
+
+                  {selectedHotel?.id === hotel.id && (
+                    <Badge className="absolute top-3 right-3 bg-teal-500 text-white">
+                      <Check className="w-3 h-3 mr-1" />
+                      Selected
+                    </Badge>
+                  )}
+                </CardContent>
+              </Card>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Bottom Bar */}
+      {selectedHotel && (
+        <div className="fixed bottom-0 left-0 right-0 bg-white border-t shadow-lg p-4">
+          <div className="max-w-7xl mx-auto flex justify-between items-center">
+            <div>
+              <p className="text-xs text-gray-500">Selected Hotel</p>
+              <p className="font-medium">{selectedHotel.name}</p>
+            </div>
+            <Button
+              size="lg"
+              onClick={handleContinue}
+              className="bg-gradient-to-r from-teal-500 to-teal-600"
+            >
+              Continue
+              <ChevronRight className="w-5 h-5 ml-2" />
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
 }

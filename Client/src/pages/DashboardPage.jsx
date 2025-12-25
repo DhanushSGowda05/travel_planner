@@ -2,7 +2,7 @@ import React from "react";
 import { DashboardNavbar } from "@/components/dashboard/DashboardNavbar";
 import { WelcomeBanner } from "@/components/dashboard/WelcomeBanner";
 import { QuickActions } from "@/components/dashboard/QuickActions";
-import { MyTrips } from "@/components/dashboard/MyTrips";
+import  MyTrips  from "@/components/dashboard/MyTrips";
 import { TravelInsights } from "@/components/dashboard/TravelInsights";
 import { Recommendations } from "@/components/dashboard/Recommendations";
 

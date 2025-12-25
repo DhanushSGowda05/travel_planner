@@ -216,7 +216,7 @@ export function MyTrips() {
 
               {/* BUTTONS */}
               <div className="flex items-center gap-3">
-                <Button variant="outline" size="sm" className="border-cyan-200 text-cyan-700 hover:bg-cyan-50 gap-1">
+                <Button variant="outline" size="sm" className="border-cyan-200 text-cyan-700 hover:bg-cyan-50 gap-1" onClick={() => navigate(`/trip-itinerary/${trip.id}`)}>
                   <Eye className="h-4 w-4" /> View
                 </Button>
 
