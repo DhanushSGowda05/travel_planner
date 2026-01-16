@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { createTrip } from "../services/tripService";
 
@@ -24,6 +24,8 @@ export default function TripFormPage() {
     "sports",
   ];
 
+  const [budgetMode, setBudgetMode] = useState("type"); // "type" | "amount"
+
   const [form, setForm] = useState({
     origin_city: "",
     destination_city: "",
@@ -33,45 +35,77 @@ export default function TripFormPage() {
     budget_amount: "",
     num_people: 1,
     preferences: [],
+    dislikes: [],
     mandatory_places: "",
     food_preference: "Any",
-    pace: "mid", // low, mid, high → converts before sending
+    pace: "mid",
   });
 
-  // Toggle preference checkbox
+  /* ---------------------------
+     PREFERENCES
+  --------------------------- */
   const togglePreference = (pref) => {
+    setForm((prev) => {
+      const updatedPrefs = prev.preferences.includes(pref)
+        ? prev.preferences.filter((p) => p !== pref)
+        : [...prev.preferences, pref];
+
+      // ensure no overlap with dislikes
+      const updatedDislikes = prev.dislikes.filter(
+        (d) => !updatedPrefs.includes(d)
+      );
+
+      return {
+        ...prev,
+        preferences: updatedPrefs,
+        dislikes: updatedDislikes,
+      };
+    });
+  };
+
+  /* ---------------------------
+     DISLIKES (derived options)
+  --------------------------- */
+  const availableDislikes = useMemo(
+    () =>
+      PREFERENCES_LIST.filter(
+        (item) => !form.preferences.includes(item)
+      ),
+    [form.preferences]
+  );
+
+  const toggleDislike = (item) => {
     setForm((prev) => ({
       ...prev,
-      preferences: prev.preferences.includes(pref)
-        ? prev.preferences.filter((p) => p !== pref)
-        : [...prev.preferences, pref],
+      dislikes: prev.dislikes.includes(item)
+        ? prev.dislikes.filter((d) => d !== item)
+        : [...prev.dislikes, item],
     }));
   };
 
+  /* ---------------------------
+     SUBMIT
+  --------------------------- */
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
 
     try {
-      // AUTO-GENERATE DISLIKES
-      const dislikes = PREFERENCES_LIST.filter(
-        (item) => !form.preferences.includes(item)
-      );
-
       const payload = {
         origin_city: form.origin_city,
         destination_city: form.destination_city,
         start_date: form.start_date,
         end_date: form.end_date,
 
-        budget_type: form.budget_type,
-        budget_amount: form.budget_amount
-          ? Number(form.budget_amount)
-          : null,
+        budget_type: budgetMode === "type" ? form.budget_type : null,
+        budget_amount:
+          budgetMode === "amount"
+            ? Number(form.budget_amount)
+            : null,
 
         num_people: Number(form.num_people),
         preferences: form.preferences,
-        dislikes: dislikes,
+        dislikes: form.dislikes,
 
         mandatory_places: form.mandatory_places
           ? form.mandatory_places.split(",").map((s) => s.trim())
@@ -90,11 +124,10 @@ export default function TripFormPage() {
       const data = await createTrip(payload);
       const tripId = data.trip_id ?? data.id;
 
-      if (!tripId) throw new Error("Trip ID missing from response");
+      if (!tripId) throw new Error("Trip ID missing");
 
       navigate(`/trip-options/${tripId}`);
     } catch (err) {
-      console.error(err);
       alert(err.message || "Failed to create trip");
     } finally {
       setLoading(false);
@@ -112,7 +145,6 @@ export default function TripFormPage() {
         </p>
       </div>
 
-      {/* FORM */}
       <form
         onSubmit={handleSubmit}
         className="bg-white shadow-lg rounded-xl p-8 space-y-8 border border-slate-200"
@@ -121,9 +153,7 @@ export default function TripFormPage() {
         {/* SECTION 1: DESTINATIONS */}
         <section>
           <h2 className="text-xl font-semibold text-slate-800 mb-4">📍 Destinations</h2>
-
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-            {/* ORIGIN */}
             <div>
               <label className="text-sm font-medium text-slate-700">Origin City</label>
               <input
@@ -132,12 +162,10 @@ export default function TripFormPage() {
                 onChange={(e) =>
                   setForm((prev) => ({ ...prev, origin_city: e.target.value }))
                 }
-                placeholder="e.g. Bengaluru"
                 className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
               />
             </div>
 
-            {/* DESTINATION */}
             <div>
               <label className="text-sm font-medium text-slate-700">Destination City</label>
               <input
@@ -146,7 +174,6 @@ export default function TripFormPage() {
                 onChange={(e) =>
                   setForm((prev) => ({ ...prev, destination_city: e.target.value }))
                 }
-                placeholder="e.g. Goa"
                 className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
               />
             </div>
@@ -158,14 +185,12 @@ export default function TripFormPage() {
         {/* SECTION 2: DATES */}
         <section>
           <h2 className="text-xl font-semibold text-slate-800 mb-4">📅 Trip Dates</h2>
-
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-            {/* START DATE */}
             <div>
               <label className="text-sm font-medium text-slate-700">Start Date</label>
               <input
-                required
                 type="date"
+                required
                 value={form.start_date}
                 onChange={(e) =>
                   setForm((prev) => ({ ...prev, start_date: e.target.value }))
@@ -174,12 +199,11 @@ export default function TripFormPage() {
               />
             </div>
 
-            {/* END DATE */}
             <div>
               <label className="text-sm font-medium text-slate-700">End Date</label>
               <input
-                required
                 type="date"
+                required
                 value={form.end_date}
                 onChange={(e) =>
                   setForm((prev) => ({ ...prev, end_date: e.target.value }))
@@ -192,31 +216,53 @@ export default function TripFormPage() {
 
         <hr className="border-slate-200" />
 
-        {/* SECTION 3: BUDGET + PEOPLE + PACE */}
+        {/* SECTION 3: BUDGET + GROUP */}
         <section>
           <h2 className="text-xl font-semibold text-slate-800 mb-4">💵 Budget & Group</h2>
 
+          {/* Budget toggle (already visually present in your screenshot) */}
+          <div className="flex gap-6 mb-4">
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                checked={budgetMode === "type"}
+                onChange={() => setBudgetMode("type")}
+              />
+              Budget Type
+            </label>
+
+            <label className="flex items-center gap-2">
+              <input
+                type="radio"
+                checked={budgetMode === "amount"}
+                onChange={() => setBudgetMode("amount")}
+              />
+              Budget Amount
+            </label>
+          </div>
+
           <div className="grid grid-cols-1 sm:grid-cols-4 gap-6">
 
-            {/* BUDGET TYPE */}
-            <div>
-              <label className="text-sm font-medium text-slate-700">Budget Type</label>
-              <select
-                required
-                value={form.budget_type}
-                onChange={(e) =>
-                  setForm((prev) => ({ ...prev, budget_type: e.target.value }))
-                }
-                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
-              >
-                <option value="">Select...</option>
-                {BUDGET_TYPES.map((b) => (
-                  <option key={b} value={b}>{b}</option>
-                ))}
-              </select>
-            </div>
+            {/* Budget Type */}
+            {budgetMode === "type" && (
+              <div>
+                <label className="text-sm font-medium text-slate-700">Budget Type</label>
+                <select
+                  value={form.budget_type}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, budget_type: e.target.value }))
+                  }
+                  className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
+                >
+                  <option value="">Select...</option>
+                  {BUDGET_TYPES.map((b) => (
+                    <option key={b} value={b}>{b}</option>
+                  ))}
+                </select>
+              </div>
+            )}
 
-            {/* TRAVELLERS */}
+            {/* Travellers */}
             <div>
               <label className="text-sm font-medium text-slate-700">Travellers</label>
               <input
@@ -233,21 +279,23 @@ export default function TripFormPage() {
               />
             </div>
 
-            {/* BUDGET AMOUNT */}
-            <div>
-              <label className="text-sm font-medium text-slate-700">Budget Amount</label>
-              <input
-                type="number"
-                value={form.budget_amount}
-                onChange={(e) =>
-                  setForm((prev) => ({ ...prev, budget_amount: e.target.value }))
-                }
-                placeholder="₹ Amount"
-                className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
-              />
-            </div>
+            {/* Budget Amount */}
+            {budgetMode === "amount" && (
+              <div>
+                <label className="text-sm font-medium text-slate-700">Budget Amount</label>
+                <input
+                  type="number"
+                  value={form.budget_amount}
+                  onChange={(e) =>
+                    setForm((prev) => ({ ...prev, budget_amount: e.target.value }))
+                  }
+                  placeholder="₹ Amount"
+                  className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
+                />
+              </div>
+            )}
 
-            {/* PACE */}
+            {/* Pace */}
             <div>
               <label className="text-sm font-medium text-slate-700">Pace</label>
               <select
@@ -270,7 +318,6 @@ export default function TripFormPage() {
         {/* SECTION 4: PREFERENCES */}
         <section>
           <h2 className="text-xl font-semibold text-slate-800 mb-4">🎒 Preferences</h2>
-
           <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
             {PREFERENCES_LIST.map((pref) => (
               <label key={pref} className="flex items-center gap-2">
@@ -284,7 +331,6 @@ export default function TripFormPage() {
             ))}
           </div>
 
-          {/* MANDATORY PLACES */}
           <div className="mt-5">
             <label className="text-sm font-medium text-slate-700">Mandatory Places</label>
             <input
@@ -292,7 +338,6 @@ export default function TripFormPage() {
               onChange={(e) =>
                 setForm((prev) => ({ ...prev, mandatory_places: e.target.value }))
               }
-              placeholder="e.g. Taj Mahal, Marine Drive"
               className="mt-2 w-full border border-slate-300 px-3 py-2 rounded-lg"
             />
           </div>
@@ -300,46 +345,54 @@ export default function TripFormPage() {
 
         <hr className="border-slate-200" />
 
+        {/* SECTION 4.5: DISLIKES (ADDITIVE, SAME UI) */}
+        {availableDislikes.length > 0 && (
+          <section>
+            <h2 className="text-xl font-semibold text-slate-800 mb-4">🚫 Dislikes</h2>
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+              {availableDislikes.map((item) => (
+                <label key={item} className="flex items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={form.dislikes.includes(item)}
+                    onChange={() => toggleDislike(item)}
+                  />
+                  <span className="capitalize">{item}</span>
+                </label>
+              ))}
+            </div>
+          </section>
+        )}
+
+        <hr className="border-slate-200" />
+
         {/* SECTION 5: FOOD */}
         <section>
           <h2 className="text-xl font-semibold text-slate-800 mb-4">🍽️ Food Preference</h2>
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="food"
+              checked={form.food_preference === "Veg-Only"}
+              onChange={() =>
+                setForm((prev) => ({ ...prev, food_preference: "Veg-Only" }))
+              }
+            />
+            Veg-Only
+          </label>
 
-          <div className="space-y-2">
-            <label className="flex items-center gap-2">
-              <input
-                type="radio"
-                name="food"
-                value="Veg-Only"
-                checked={form.food_preference === "Veg-Only"}
-                onChange={(e) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    food_preference: e.target.value,
-                  }))
-                }
-              />
-              Veg-Only
-            </label>
-
-            <label className="flex items-center gap-2">
-              <input
-                type="radio"
-                name="food"
-                value="Any"
-                checked={form.food_preference === "Any"}
-                onChange={(e) =>
-                  setForm((prev) => ({
-                    ...prev,
-                    food_preference: e.target.value,
-                  }))
-                }
-              />
-              Any
-            </label>
-          </div>
+          <label className="flex items-center gap-2">
+            <input
+              type="radio"
+              name="food"
+              checked={form.food_preference === "Any"}
+              onChange={() =>
+                setForm((prev) => ({ ...prev, food_preference: "Any" }))
+              }
+            />
+            Any
+          </label>
         </section>
-
-        <hr className="border-slate-200" />
 
         {/* SUBMIT */}
         <div className="flex justify-end">

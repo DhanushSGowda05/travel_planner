@@ -954,13 +954,38 @@ def update_cluster_stats(cluster_id, cluster_data, all_places_dict):
     # as centroid shift is usually negligible for one place.
 
 
-@app.route("/ilp_solver",methods=["POST"])
-@login_required
+@app.route("/ilp_solver", methods=["POST"])
 def ilp_solver():
     print("started")
     data = request.get_json()
     trip_id = data.get('trip_id')
     trip = db.session.get(Trip, trip_id)
+    
+    # 🔐 SAFETY: clustering task must exist
+    if "perform_clustering" not in t:
+        return jsonify({
+            "error": "Clustering task not started yet"
+        }), 400
+
+    clustering_task = AsyncResult(t["perform_clustering"], app=tasks.celery)
+
+# 🔄 Task still running
+    if not clustering_task.ready():
+        return jsonify({
+        "status": "processing",
+        "message": "Clustering still running"
+        }), 202
+
+# ❌ Task failed
+    if clustering_task.failed():
+        return jsonify({
+        "error": "Clustering task failed",
+        "details": str(clustering_task.result)
+    }), 500
+
+# ✅ Task completed
+    t_r = clustering_task.result
+
     # start=trip.start_date
     # end=trip.end_date
     t_price=0
@@ -969,6 +994,11 @@ def ilp_solver():
     thre_time = time(14, 30, 0)
     if trip.budget_type is not None:
         task_result = AsyncResult(t["get_travel_cost"], app=tasks.celery)
+        if not task_result.ready():
+            return jsonify({
+                "status": "processing",
+                "message": "Cost calculation still running"
+            }), 202
         daily_price = task_result.result["final_cost"]
     else:
         if trip.needs_transport:
@@ -1089,7 +1119,21 @@ def ilp_solver():
     final_itinerary = {}
     
     # 1. Create a lookup for places by ID for easy access
-    all_places_dict = {p['id']: p for p in t_r['Places']}
+    if not isinstance(t_r, dict):
+        return jsonify({"error": "Invalid clustering result", "debug": t_r}), 500
+
+    required_keys = {"Places", "clustering", "centroid"}
+    missing = required_keys - t_r.keys()
+
+    if missing:
+        return jsonify({
+            "error": "Incomplete clustering data",
+            "missing_keys": list(missing),
+            "available_keys": list(t_r.keys())
+    }), 500
+
+    all_places_dict = {p['id']: p for p in t_r["Places"]}
+
     
     # 2. Identify available clusters (keys are strings "0", "1", etc.)
     # We maintain a list of cluster IDs that haven't been processed yet
