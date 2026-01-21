@@ -48,7 +48,7 @@ export default function AccommodationOptionPage() {
       if (needsAccommodation === "yes") {
         navigate(`/hotel-selection/${tripId}`);
       } else {
-        navigate(`/transport-option/${tripId}`);
+        navigate(`/trip-itinerary/${tripId}`);
       }
     } catch (err) {
       alert("Failed to update accommodation details");

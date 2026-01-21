@@ -168,6 +168,28 @@ export async function runIlpSolver(payload) {
     body: JSON.stringify(payload),
   });
 
-  if (!res.ok) throw new Error("Failed to generate itinerary");
-  return res.json();
+  const data = await res.json();
+
+  // Allow backend to finish even if intermediate error occurs
+  if (!res.ok) {
+    console.warn("ILP solver warning:", data);
+    return data;
+  }
+
+  return data;
+}
+
+//view button get itinerary
+export async function getItineraryFromDB(tripId) {
+  const res = await fetch(`${BASE}/itinerary/${tripId}`, {
+    credentials: "include",
+  });
+
+  if (!res.ok) {
+    // 404 OR empty itinerary → treated as not existing
+    return null;
+  }
+
+  const data = await res.json();
+  return data.itinerary;
 }

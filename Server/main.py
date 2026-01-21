@@ -1,5 +1,7 @@
 import json
 import os
+import time
+from datetime import datetime, timedelta,date, time as dt_time
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import (
@@ -13,14 +15,13 @@ from flask_login import (
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_cors import CORS
 from pydantic import BaseModel, EmailStr, ValidationError, field_validator, model_validator, PositiveInt 
-from datetime import date
+
 from typing import List, Optional, Literal 
 from tasks import perform_clustering, get_travel_cost
 from celery.result import AsyncResult
 import tasks # Import the module to access the celery instance config if needed
 import pandas as pd
 import numpy as np
-from datetime import datetime
 from flask import request
 
 
@@ -618,86 +619,114 @@ def transport_option():
 @login_required
 def update_accomodation():
     """
-    Updates any/all optional details for an existing trip.
-    This version manually checks for each expected key.
+    Updates accommodation-related details for an existing trip.
+    Handles both:
+    - User needs accommodation
+    - User does NOT need accommodation (skip hotel)
     """
     data = request.get_json()
 
     try:
+        # Validate payload structure (does NOT mutate DB)
         model = AccModel.model_validate(data)
-        # 1. Get the trip_id from the raw JSON data
-        trip_id = data.get('trip_id')
+
+        # -------------------------------
+        # 1. Extract & validate trip_id
+        # -------------------------------
+        trip_id = data.get("trip_id")
         if not trip_id:
-            return jsonify({"errors": {"trip": "trip_id is missing from request."}}), 400
+            return jsonify({
+                "errors": {"trip": "trip_id is missing from request."}
+            }), 400
 
-        # 2. Find the trip in the database
         trip = db.session.get(Trip, trip_id)
-
-        # 3. Security Checks
         if not trip:
-            return jsonify({"errors": {"trip": "Trip not found."}}), 404
-        
-        # ---
-        # CRITICAL: You must keep this security check.
-        # It ensures a user can only edit their *own* trips.
-        # ---
-        if 'needs_accommodation' in data:
-            trip.needs_accommodation = data['needs_accommodation']
-        if 'accommodation_type' in data:
-            trip.accommodation_type = data['accommodation_type']
-        if 'acc_loc' in data:
-            trip.acc_loc=data["acc_loc"]
+            return jsonify({
+                "errors": {"trip": "Trip not found."}
+            }), 404
 
-        # 2. Prepare API request
+        # -------------------------------
+        # 2. Update basic fields safely
+        # -------------------------------
+        if "needs_accommodation" in data:
+            trip.needs_accommodation = data["needs_accommodation"]
+
+        if "accommodation_type" in data:
+            trip.accommodation_type = data["accommodation_type"]
+
+        if "acc_loc" in data:
+            trip.acc_loc = data["acc_loc"]
+
+        # ---------------------------------------------------
+        # 3. If user DOES NOT need accommodation → CLEAN UP
+        # ---------------------------------------------------
+        if not trip.needs_accommodation:
+            trip.accommodation_type = None
+            trip.acc_loc = None
+            trip.hotel_name = None
+            trip.hotel_lat = None
+            trip.hotel_long = None
+            trip.hotel_price = 0
+
+            db.session.commit()
+            return jsonify({
+                "message": "Accommodation skipped successfully.",
+                "trip_id": trip.id
+            }), 200
+
+        # ---------------------------------------------------
+        # 4. Geocode ONLY if location is provided & valid
+        # ---------------------------------------------------
+        if trip.acc_loc and trip.acc_loc.strip():
             url = "https://nominatim.openstreetmap.org/search"
             params = {
-                'q': trip.acc_loc,
-                'format': 'json'
+                "q": trip.acc_loc,
+                "format": "json"
             }
-            
-            # Nominatim usage policy requires a custom User-Agent to identify the application
-            # We need a unique User-Agent to avoid 403 Forbidden errors. 
             headers = {
-                'User-Agent': 'FlaskGeocodingProject/1.0 (educational_test)' 
+                "User-Agent": "FlaskGeocodingProject/1.0 (educational_test)"
             }
 
             try:
-                # 3. Send request to Nominatim API
                 response = requests.get(url, params=params, headers=headers)
-                response.raise_for_status() # Raise an exception for HTTP errors
-                
-                data = response.json()
-                # 4. Handle empty results
-                if not data:
-                    return jsonify({'error': 'Location not found'}), 404
+                response.raise_for_status()
 
-                # 5. Extract data from the first result
-                first_result = data[0]
-                trip.hotel_name=""
-                trip.hotel_lat=first_result.get('lat')
-                trip.hotel_long=first_result.get('lon')
-                task_result = AsyncResult(t["perform_clustering"], app=tasks.celery)
-                global t_r
-                t_r=task_result.result
+                geo_data = response.json()
+                if not geo_data:
+                    return jsonify({
+                        "error": "Location not found"
+                    }), 404
+
+                first_result = geo_data[0]
+                trip.hotel_lat = first_result.get("lat")
+                trip.hotel_long = first_result.get("lon")
+
             except requests.RequestException as e:
-                return jsonify({'error': f'Error connecting to Nominatim API: {str(e)}'}), 502
-            
-            except Exception as e:
-                return jsonify({'error': f'An unexpected error occurred: {str(e)}'}), 500
+                return jsonify({
+                    "error": f"Error connecting to Nominatim API: {str(e)}"
+                }), 502
 
-
+        # -------------------------------
+        # 5. Save changes
+        # -------------------------------
         db.session.commit()
-        
-        return jsonify({"message": "Trip details updated successfully!", "trip_id": trip.id}), 200
+
+        return jsonify({
+            "message": "Accommodation details updated successfully!",
+            "trip_id": trip.id
+        }), 200
 
     except ValidationError as e:
-        # If validation fails, send back the formatted errors
-        return jsonify({"errors": format_pydantic_errors(e)}), 400
+        return jsonify({
+            "errors": format_pydantic_errors(e)
+        }), 400
 
     except Exception as e:
-        # Catch any other potential errors (like database errors)
         db.session.rollback()
-        return jsonify({"errors": {"database": str(e)}}), 500
+        return jsonify({
+            "errors": {"database": str(e)}
+        }), 500
+
 
 
 @app.route("/up_transport_choice",methods=["POST"])
@@ -876,6 +905,34 @@ def hotel_option():
         print(f"Internal error in hotel_option: {e}")
         return jsonify({"error": f"Internal error in hotel_option: {e} ","tasks_id":t,"tasks":t_r}), 500
 
+@app.route("/itinerary/<int:trip_id>", methods=["GET"])
+@login_required
+def get_itinerary(trip_id):
+    itinerary = Itinerary.query.filter_by(trip_id=trip_id).first()
+
+    if not itinerary or not itinerary.daily_plan:
+        return jsonify({
+            "exists": False,
+            "reason": "empty_or_missing"
+        }), 404
+
+    # ✅ check if ANY day has places
+    has_any_places = any(
+        day.get("places") for day in itinerary.daily_plan.values()
+    )
+
+    if not has_any_places:
+        return jsonify({
+            "exists": False,
+            "reason": "empty_itinerary"
+        }), 404
+
+    return jsonify({
+        "exists": True,
+        "itinerary": itinerary.daily_plan
+    }), 200
+
+
 
 @app.route("/hotel_choice",methods=["POST"])
 @login_required
@@ -897,8 +954,7 @@ def hotel_choice():
     return jsonify({"message": "Choice updated successfully."}), 200
 
 
-from datetime import time,timedelta
-import datetime
+
 import ilp_sol
 import math
 
@@ -953,13 +1009,55 @@ def update_cluster_stats(cluster_id, cluster_data, all_places_dict):
     # Note: We are not recalculating 'nearest_clusters' here to save time, 
     # as centroid shift is usually negligible for one place.
 
+def wait_for_gemini_budget(task_id, timeout=90, poll_interval=3):
+    """
+    Waits for Gemini budget up to `timeout` seconds.
+    Returns:
+      - float budget if success
+      - None if timeout or failure
+    """
+    task = AsyncResult(task_id, app=tasks.celery)
+    waited = 0
 
+    while waited < timeout:
+        if task.ready():
+            if task.failed():
+                return None
+            return task.result.get("final_cost")
+
+        time.sleep(poll_interval)
+        waited += poll_interval
+
+    return None
 @app.route("/ilp_solver", methods=["POST"])
 def ilp_solver():
     print("started")
     data = request.get_json()
     trip_id = data.get('trip_id')
     trip = db.session.get(Trip, trip_id)
+    
+    # ---------------- DATE NORMALIZATION (CRITICAL) ----------------
+    trip_start = trip.start_date
+    trip_end = trip.end_date
+
+    # SQLAlchemy may return date OR datetime
+    if isinstance(trip_start, datetime):
+        trip_start = trip_start.date()
+
+    if isinstance(trip_end, datetime):
+        trip_end = trip_end.date()
+
+    # Safety check (optional but recommended)
+    if not isinstance(trip_start, date) or not isinstance(trip_end, date):
+        return jsonify({
+            "error": "Invalid trip dates",
+            "start_type": str(type(trip.start_date)),
+            "end_type": str(type(trip.end_date))
+        }), 500
+# ---------------------------------------------------------------
+
+    
+
     
     # 🔐 SAFETY: clustering task must exist
     if "perform_clustering" not in t:
@@ -986,20 +1084,29 @@ def ilp_solver():
 # ✅ Task completed
     t_r = clustering_task.result
 
+    
     # start=trip.start_date
     # end=trip.end_date
     t_price=0
     h_price=0
     daily_timings=[]
-    thre_time = time(14, 30, 0)
+    thre_time = dt_time(14, 30, 0)
     if trip.budget_type is not None:
-        task_result = AsyncResult(t["get_travel_cost"], app=tasks.celery)
-        if not task_result.ready():
+        if "get_travel_cost" not in t:
+            return jsonify({
+                "error": "Budget estimation task not started"
+            }), 400
+
+        daily_price = wait_for_gemini_budget(t["get_travel_cost"])
+
+        if daily_price is None:
             return jsonify({
                 "status": "processing",
-                "message": "Cost calculation still running"
+                "message": "Waiting for budget estimation",
+                "retry_after_seconds": 5
             }), 202
-        daily_price = task_result.result["final_cost"]
+
+        
     else:
         if trip.needs_transport:
             if trip.up_mode.lower()=="flight":
@@ -1039,40 +1146,90 @@ def ilp_solver():
 
         if trip.needs_accommodation:
             h_price=trip.hotel_price
-        d=trip.end_date-trip.start_date
+        d=trip_end-trip_start
         daily_price=((trip.budget_amount//trip.num_people)-t_price)//(d.days+1)-h_price
+        
+        if daily_price is None or daily_price <= 0:
+            return jsonify({
+                "error": "Invalid daily budget calculated",
+                "daily_price": daily_price
+            }), 400
+
     
+        # --- NORMALIZE DATE COLUMNS (SAFE) ---
+    bus['departure_date'] = pd.to_datetime(bus['departure_date']).dt.date
+    train['departure_date'] = pd.to_datetime(train['departure_date']).dt.date
+    flight['departure_date'] = pd.to_datetime(flight['departure_date']).dt.date
+
+
     if trip.needs_transport:
-        if trip.up_mode.lower()=="flight":
-            u=flight[(flight['flight_id'] == trip.up_mode_id) & 
-                    (flight['source_city'] == trip.origin_city) & 
-                    (flight['destination_city'] == trip.destination_city)&
-                    (flight['departure_date']==trip.start_date.strftime('%Y-%m-%d'))]
-        elif trip.up_mode.lower()=="train":
-            u=train[(train['train_id'] == trip.up_mode_id) & 
-                    (train['source_city'] == trip.origin_city) & 
-                    (train['destination_city'] == trip.destination_city)&
-                    (train['departure_date']==trip.start_date.strftime('%Y-%m-%d'))]
+
+        # =======================
+        # UPWARD TRANSPORT
+        # =======================
+        if trip.up_mode.lower() == "flight":
+            df = flight
+            id_col = "flight_id"
+        elif trip.up_mode.lower() == "train":
+            df = train
+            id_col = "train_id"
         else:
-            u=bus[(bus['bus_id'] == trip.up_mode_id) & 
-                    (bus['source_city'] == trip.origin_city) & 
-                    (bus['destination_city'] == trip.destination_city)&
-                    (bus['departure_date']==trip.start_date.strftime('%Y-%m-%d'))]   
-        if trip.down_mode.lower()=="flight":
-            d=flight[(flight['flight_id'] == trip.down_mode_id) & 
-                    (flight['source_city'] == trip.destination_city) & 
-                    (flight['destination_city'] == trip.origin_city)&
-                    (flight['departure_date']==trip.end_date.strftime('%Y-%m-%d'))]
-        elif trip.down_mode.lower()=="train":
-            d=train[(train['train_id'] == trip.down_mode_id) & 
-                    (train['source_city'] == trip.destination_city) & 
-                    (train['destination_city'] == trip.origin_city)&
-                    (train['departure_date']==trip.end_date.strftime('%Y-%m-%d'))]
+            df = bus
+            id_col = "bus_id"
+
+        u = df[
+            (df[id_col] == trip.up_mode_id) &
+            (df['source_city'] == trip.origin_city) &
+            (df['destination_city'] == trip.destination_city) &
+            (df['departure_date'] >= trip_start)
+        ].sort_values('departure_date').head(1)
+
+        if u.empty:
+            return jsonify({
+                "error": "Upward transport not found",
+                "debug": {
+                    "mode": trip.up_mode,
+                    "mode_id": trip.up_mode_id,
+                    "from": trip.origin_city,
+                    "to": trip.destination_city,
+                    "trip_start": trip.start_date.strftime('%Y-%m-%d')
+                }
+            }), 400
+
+
+        # =======================
+        # RETURN TRANSPORT
+        # =======================
+        if trip.down_mode.lower() == "flight":
+            df = flight
+            id_col = "flight_id"
+        elif trip.down_mode.lower() == "train":
+            df = train
+            id_col = "train_id"
         else:
-            d=bus[(bus['bus_id'] == trip.down_mode_id) & 
-                    (bus['source_city'] == trip.destination_city) & 
-                    (bus['destination_city'] == trip.origin_city)&
-                    (bus['departure_date']==trip.end_date.strftime('%Y-%m-%d'))]  
+            df = bus
+            id_col = "bus_id"
+
+        d = df[
+            (df[id_col] == trip.down_mode_id) &
+            (df['source_city'] == trip.destination_city) &
+            (df['destination_city'] == trip.origin_city) &
+            (df['departure_date'] <= trip_end)
+        ].sort_values('departure_date', ascending=False).head(1)
+
+        if d.empty:
+            return jsonify({
+                "error": "Return transport not found",
+                "debug": {
+                    "mode": trip.down_mode,
+                    "mode_id": trip.down_mode_id,
+                    "from": trip.destination_city,
+                    "to": trip.origin_city,
+                    "trip_end": trip.end_date.strftime('%Y-%m-%d')
+                }
+            }), 400
+
+
         start = pd.to_datetime(u["arrival_date"].iloc[0]).date()
         end = pd.to_datetime(d["departure_date"].iloc[0]).date()
         arrival_dt = pd.to_datetime(u["arrival_time"].iloc[0], format='%H:%M:%S') + timedelta(hours=2)
@@ -1143,6 +1300,16 @@ def ilp_solver():
     day_index=0
     print(current_date)
     print(end)
+    existing_itinerary = Itinerary.query.filter_by(trip_id=trip_id).first()
+
+    if not existing_itinerary:
+        existing_itinerary = Itinerary(
+            trip_id=trip_id,
+            daily_plan={}
+        )
+        db.session.add(existing_itinerary)
+        db.session.commit()
+
     while current_date <= end:
         date_str = current_date.strftime("%Y-%m-%d")
         day_name = current_date.strftime("%A")
@@ -1243,21 +1410,10 @@ def ilp_solver():
         available_cluster_ids.remove(best_cluster_id)
         current_date += timedelta(days=1)
         print(day_name+"  success clsuter reordering")
-        existing_itinerary = Itinerary.query.filter_by(trip_id=trip_id).first()
-
-        if existing_itinerary:
-            print(f"🔄 Itinerary exists for Trip {trip_id}. Updating...")
-            # UPDATE the existing row
-            existing_itinerary.daily_plan = final_itinerary# Update timestamp
-        else:
-            print(f"💾 Saving NEW itinerary for Trip {trip_id}...")
-            # CREATE a new row
-            new_itinerary = Itinerary(
-                trip_id=trip_id,
-                daily_plan=final_itinerary
-            )
-        db.session.add(new_itinerary)
+        
+        existing_itinerary.daily_plan = final_itinerary
         db.session.commit()
+
     return jsonify(final_itinerary), 200
 
 

@@ -1,5 +1,6 @@
 import pulp,os
 import json
+import time
 import requests
 from math import radians, cos, sin, asin, sqrt
 from dotenv import load_dotenv
@@ -123,44 +124,60 @@ def build_distance_matrix_ola_batched(all_nodes, api_key, mode="driving", max_pa
 # ==========================================
 # 2. MAIN OPTIMIZATION FUNCTION
 # ==========================================
+restaurant_cache = {}
 
 def get_nearby_restaurants(lat, lon, preference='all', radius=1000):
     """
-    Finds nearby restaurants using the Overpass API and returns only those with valid addresses.
-    
+    Finds nearby restaurants using the Overpass API with caching and rate limiting.
+
     Args:
-        lat (float/str): Latitude of the center point.
-        lon (float/str): Longitude of the center point.
-        preference (str): 'veg', 'nonveg', or 'all' (default).
-        radius (int): Search radius in meters (default 1000).
-        
+        lat (float/str): Latitude
+        lon (float/str): Longitude
+        preference (str): 'veg', 'nonveg', or 'all'
+        radius (int): Search radius in meters
+
     Returns:
-        list: A list of dictionaries [{"name": "...", "address": "..."}, ...]
+        list: [{"name": "...", "address": "..."}]
     """
-    
-    # 1. Construct the Overpass QL Query
+
+    # 🚫 Invalid coordinates guard
+    if lat is None or lon is None:
+        return []
+
+    try:
+        lat = float(lat)
+        lon = float(lon)
+    except ValueError:
+        return []
+
+    # 🔑 Cache key (rounded to avoid micro-variations)
+    cache_key = (round(lat, 4), round(lon, 4), preference.lower())
+
+    # ⚡ Cache hit → instant return
+    if cache_key in restaurant_cache:
+        return restaurant_cache[cache_key]
+
     base_type = '["amenity"="restaurant"]'
     location_filter = f'(around:{radius},{lat},{lon})'
-    
-    # Define tag filters based on preference
+
     queries = []
+
     if preference.lower() == 'veg':
         tags = ['["cuisine"="vegetarian"]', '["diet:vegetarian"="yes"]']
         for tag in tags:
             queries.append(f'node{base_type}{tag}{location_filter};')
             queries.append(f'way{base_type}{tag}{location_filter};')
-            
+
     elif preference.lower() == 'nonveg':
         tags = ['["diet:meat"="yes"]', '["cuisine"~"meat|non_veg"]']
         for tag in tags:
             queries.append(f'node{base_type}{tag}{location_filter};')
             queries.append(f'way{base_type}{tag}{location_filter};')
-            
-    else: # 'all' or no preference
+
+    else:  # all
         queries.append(f'node{base_type}{location_filter};')
         queries.append(f'way{base_type}{location_filter};')
 
-    # Join queries into the full Overpass request structure
     full_query = f"""
     [out:json][timeout:25];
     (
@@ -173,47 +190,53 @@ def get_nearby_restaurants(lat, lon, preference='all', radius=1000):
     clean_results = []
 
     try:
-        # 2. Fetch Data
-        response = requests.get(overpass_url, params={'data': full_query})
+        # 🧠 CRITICAL: Rate limiting to avoid 429 / 504
+        time.sleep(1.2)
+
+        response = requests.get(
+            overpass_url,
+            params={'data': full_query},
+            timeout=30
+        )
         response.raise_for_status()
         data = response.json()
-        
-        # 3. Parse and Filter
+
         for element in data.get('elements', []):
             tags = element.get('tags', {})
             name = tags.get('name')
-            
             if not name:
                 continue
 
-            # Build address components
             addr_parts = [
                 tags.get('addr:housenumber'),
                 tags.get('addr:street'),
                 tags.get('addr:city'),
                 tags.get('addr:postcode')
             ]
-            
-            # Create address string, removing empty parts
+
             address_str = ", ".join([p for p in addr_parts if p])
-            
-            # Check for fallback 'addr:full' if individual parts are missing
+
             if not address_str:
                 address_str = tags.get('addr:full')
 
-            # STRICT FILTER: Only add if we found a valid address
             if address_str:
                 clean_results.append({
                     "name": name,
                     "address": address_str
                 })
-                if len(clean_results) >= 5:
-                    break
+
+            if len(clean_results) >= 5:
+                break
+
     except Exception as e:
         print(f"Error fetching restaurants: {e}")
+        restaurant_cache[cache_key] = []
         return []
 
-    return clean_results[:5]
+    # ✅ Cache result (even if empty → prevents repeat calls)
+    restaurant_cache[cache_key] = clean_results[:5] if clean_results else []
+
+    return restaurant_cache[cache_key]
 
 def generate_itinerary(places_json, hotel_name, hotel_lat, hotel_lon, day, daily_budget, pace,start_time,end_time,meal_type):
     """

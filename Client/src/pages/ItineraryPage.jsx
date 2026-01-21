@@ -1,239 +1,190 @@
-import { useState, useCallback, useEffect } from "react";
+import {
+  useState,
+  useEffect,
+  useMemo,
+  useCallback,
+} from "react";
 import { useParams } from "react-router-dom";
+
 import AppSidebar from "@/components/itinerary/AppSidebar";
 import ItineraryPanel from "@/components/itinerary/ItineraryPanel";
 import MapPanel from "@/components/itinerary/MapPanel";
-import { runIlpSolver } from "@/services/tripService";
 
-/* --------------------------------------------------
-   NORMALIZE ILP RESPONSE → FRONTEND SHAPE
--------------------------------------------------- */
-const normalizeItinerary = (ilpData) => {
-  const days = Object.entries(ilpData).map(([dateKey, day]) => ({
-    id: dateKey,
-    date: day.date,
-    day: day.day,
+import { getItineraryFromDB, runIlpSolver } from "@/services/tripService";
 
-    // meals is an OBJECT (breakfast/lunch/dinner)
-    meals: day.meals || { breakfast: [], lunch: [], dinner: [] },
+/* ----------------------------------------
+   Normalize ILP response → Trip shape
+---------------------------------------- */
+function normalizeIlpResponse(ilpData, tripId) {
+  const dates = Object.keys(ilpData).sort();
 
-    places: (day.places || []).map((p, idx) => ({
-      id: String(p.id ?? `${dateKey}-${idx}`),
-      name: p.name,
-      description: p.description || "",
-      category: p.category,
-
-      // 🔑 REQUIRED FIX
-      lat: p.latitude,
-      lng: p.longitude,
-
-      start_time: p.start_time,
-      end_time: p.end_time,
-      price: p.price,
-      smart_score: p.smart_score,
-      time_duration_hours: p.time_duration_hours,
-    })),
-  }));
-
-  return days;
-};
+  return {
+    id: String(tripId),
+    name: "Generated Trip",
+    startDate: dates[0],
+    endDate: dates[dates.length - 1],
+    itinerary: ilpData,
+  };
+}
 
 export default function ItineraryPage() {
-  const { tripId } = useParams();
-
+  /* ------------------ STATE ------------------ */
   const [trip, setTrip] = useState(null);
   const [sidebarOpen, setSidebarOpen] = useState(true);
-  const [selectedDayId, setSelectedDayId] = useState(null);
-  const [selectedPlaceId, setSelectedPlaceId] = useState(null);
-  const [isEditMode, setIsEditMode] = useState(false);
-  const [originalTrip, setOriginalTrip] = useState(null);
-  const [loading, setLoading] = useState(true);
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [selectedPlace, setSelectedPlace] = useState(null);
 
-  /* -----------------------------------
-     LOAD ITINERARY FROM ILP
-  ----------------------------------- */
+  const { tripId } = useParams();
+
+  /* ------------------ FETCH ITINERARY ------------------ */
   useEffect(() => {
-    async function loadItinerary() {
-      try {
-        const data = await runIlpSolver({ trip_id: tripId });
-        const days = normalizeItinerary(data);
+    if (!tripId) return;
 
-        const tripObj = {
-          name: "TripCraft Trip",
-          startDate: days[0]?.date,
-          endDate: days[days.length - 1]?.date,
-          days,
-        };
+    const loadItinerary = async () => {
+      // 1️⃣ Try DB first
+      const dbItinerary = await getItineraryFromDB(tripId);
 
-        setTrip(tripObj);
-        setOriginalTrip(tripObj);
-        setSelectedDayId(days[0]?.id || null);
-      } catch (err) {
-        console.error("ILP solver failed:", err);
-      } finally {
-        setLoading(false);
+      if (dbItinerary) {
+        setTrip(normalizeIlpResponse(dbItinerary, tripId));
+        return;
       }
-    }
+
+      // 2️⃣ Fallback to ILP
+      const ilpResponse = await runIlpSolver({
+        trip_id: tripId,
+      });
+
+      setTrip(normalizeIlpResponse(ilpResponse, tripId));
+    };
 
     loadItinerary();
   }, [tripId]);
 
-  if (loading || !trip) {
-    return (
-      <div className="h-screen flex items-center justify-center text-gray-600">
-        Generating itinerary…
-      </div>
-    );
-  }
+  /* ------------------ DERIVED DATA ------------------ */
+  const sortedDates = useMemo(() => {
+    if (!trip?.itinerary) return [];
+    return Object.keys(trip.itinerary).sort();
+  }, [trip]);
 
-  const currentDayIndex = trip.days.findIndex((d) => d.id === selectedDayId);
-  const currentDay = trip.days[currentDayIndex];
-  const placesToday = currentDay?.places || [];
-
-  const toast = ({ title, description }) => {
-    console.log("Toast:", title, description);
-  };
-
-  /* -----------------------------------
-     SELECT PLACE
-  ----------------------------------- */
-  const handleSelectPlace = useCallback(
-    (placeId) => {
-      setSelectedPlaceId(placeId);
-
-      const dayContaining = trip.days.find((d) =>
-        d.places.some((p) => p.id === placeId)
-      );
-      if (dayContaining) setSelectedDayId(dayContaining.id);
-    },
-    [trip.days]
-  );
-
-  /* -----------------------------------
-     DELETE PLACE
-  ----------------------------------- */
-  const handleDeletePlace = useCallback(
-    (dayId, placeId) => {
-      setTrip((prev) => ({
-        ...prev,
-        days: prev.days.map((d) =>
-          d.id === dayId
-            ? { ...d, places: d.places.filter((p) => p.id !== placeId) }
-            : d
-        ),
-      }));
-
-      if (selectedPlaceId === placeId) setSelectedPlaceId(null);
-
-      toast({
-        title: "Place removed",
-        description: "The place has been deleted from your itinerary.",
-      });
-    },
-    [selectedPlaceId]
-  );
-
-  /* -----------------------------------
-     ADD PLACE (manual add)
-  ----------------------------------- */
-  const handleAddPlace = useCallback((dayId, placeObj) => {
-    if (!placeObj?.lat || !placeObj?.lng) return;
-
-    setTrip((prev) => ({
-      ...prev,
-      days: prev.days.map((d) =>
-        d.id === dayId
-          ? {
-              ...d,
-              places: [
-                ...d.places,
-                { ...placeObj, id: "p-" + Date.now() },
-              ],
-            }
-          : d
-      ),
-    }));
-  }, []);
-
-  /* -----------------------------------
-     EDIT MODE
-  ----------------------------------- */
-  const handleToggleEditMode = () => {
-    if (!isEditMode) setOriginalTrip(trip);
-    setIsEditMode(!isEditMode);
-  };
-
-  const handleSave = () => {
-    setIsEditMode(false);
-    toast({
-      title: "Changes saved",
-      description: "Your itinerary has been updated.",
-    });
-  };
-
-  const handleCancel = () => {
-    setTrip(originalTrip);
-    setIsEditMode(false);
-    toast({
-      title: "Changes discarded",
-      description: "All modifications were reverted.",
-    });
-  };
-
-  /* -----------------------------------
-     DAY NAVIGATION
-  ----------------------------------- */
-  const handleNavigateDay = (dir) => {
-    const next = dir === "prev" ? currentDayIndex - 1 : currentDayIndex + 1;
-    if (next >= 0 && next < trip.days.length) {
-      setSelectedDayId(trip.days[next].id);
-      setSelectedPlaceId(null);
+  useEffect(() => {
+    if (!selectedDate && sortedDates.length > 0) {
+      setSelectedDate(sortedDates[0]);
     }
-  };
+  }, [sortedDates, selectedDate]);
 
+  const currentDayIndex = useMemo(() => {
+    return sortedDates.findIndex(
+      (d) => d === selectedDate
+    );
+  }, [sortedDates, selectedDate]);
+
+  const currentDay = useMemo(() => {
+    if (!trip || !selectedDate) return null;
+    return trip.itinerary[selectedDate];
+  }, [trip, selectedDate]);
+
+  const allPlacesForCurrentDay =
+    currentDay?.places || [];
+
+  const daysArray = useMemo(() => {
+    if (!trip?.itinerary) return [];
+    return sortedDates.map(
+      (date) => trip.itinerary[date]
+    );
+  }, [sortedDates, trip]);
+
+  /* ------------------ HANDLERS ------------------ */
+  const handleSelectPlace = useCallback(
+    (place) => {
+      setSelectedPlace(place);
+
+      if (place && trip?.itinerary) {
+        const dateWithPlace = sortedDates.find(
+          (date) =>
+            trip.itinerary[date].places.some(
+              (p) => p.id === place.id
+            )
+        );
+
+        if (dateWithPlace) {
+          setSelectedDate(dateWithPlace);
+        }
+      }
+    },
+    [sortedDates, trip]
+  );
+
+  const handleNavigateDay = useCallback(
+    (direction) => {
+      const newIndex =
+        direction === "prev"
+          ? currentDayIndex - 1
+          : currentDayIndex + 1;
+
+      if (
+        newIndex >= 0 &&
+        newIndex < sortedDates.length
+      ) {
+        setSelectedDate(sortedDates[newIndex]);
+        setSelectedPlace(null);
+      }
+    },
+    [currentDayIndex, sortedDates]
+  );
+
+  /* ------------------ UI ------------------ */
   return (
-    <div className="h-screen flex overflow-hidden bg-gray-50">
-      {/* Sidebar */}
-      <AppSidebar
-        days={trip.days}
-        selectedDayId={selectedDayId}
-        onSelectDay={setSelectedDayId}
-        isOpen={sidebarOpen}
-        onToggle={() => setSidebarOpen(!sidebarOpen)}
-      />
-
-      {/* Right side */}
-      <div className="flex-1 flex min-w-0">
-        {/* Itinerary Panel */}
-        <div className="w-[40%] min-w-[360px] border-r border-gray-200 bg-white hidden md:block">
-          <ItineraryPanel
-            tripName={trip.name}
-            startDate={trip.startDate}
-            endDate={trip.endDate}
-            days={trip.days}
-            selectedPlaceId={selectedPlaceId}
-            isEditMode={isEditMode}
-            onSelectPlace={(p) => handleSelectPlace(p.id)}
-            onDeletePlace={handleDeletePlace}
-            onAddPlace={handleAddPlace}
-            onToggleEditMode={handleToggleEditMode}
-            onSave={handleSave}
-            onCancel={handleCancel}
-          />
+    <div className="h-screen flex overflow-hidden bg-background">
+      {!trip ? (
+        <div className="flex-1 flex items-center justify-center">
+          Loading itinerary...
         </div>
-
-        {/* Map Panel */}
-        <div className="flex-1 h-full">
-          <MapPanel
-            places={placesToday}
-            selectedPlaceId={selectedPlaceId}
-            onSelectPlace={handleSelectPlace}
-            currentDayIndex={currentDayIndex}
-            totalDays={trip.days.length}
-            onNavigateDay={handleNavigateDay}
+      ) : (
+        <>
+          {/* Sidebar */}
+          <AppSidebar
+            days={daysArray}
+            selectedDate={selectedDate}
+            onSelectDay={setSelectedDate}
+            isOpen={sidebarOpen}
+            onToggle={() =>
+              setSidebarOpen(!sidebarOpen)
+            }
           />
-        </div>
-      </div>
+
+          {/* Main Content */}
+          <div className="flex-1 flex min-w-0">
+            {/* Itinerary Panel */}
+            <div className="w-[40%] min-w-[360px] border-r border-border">
+              <ItineraryPanel
+                tripName={trip.name}
+                startDate={trip.startDate}
+                endDate={trip.endDate}
+                days={daysArray}
+                selectedPlaceId={
+                  selectedPlace
+                    ? String(selectedPlace.id)
+                    : null
+                }
+                selectedDate={selectedDate}
+                onSelectPlace={handleSelectPlace}
+              />
+            </div>
+
+            {/* Map Panel */}
+            <div className="flex-1">
+              <MapPanel
+                places={allPlacesForCurrentDay}
+                selectedPlace={selectedPlace}
+                onSelectPlace={handleSelectPlace}
+                currentDayIndex={currentDayIndex}
+                totalDays={sortedDates.length}
+                onNavigateDay={handleNavigateDay}
+              />
+            </div>
+          </div>
+        </>
+      )}
     </div>
   );
 }

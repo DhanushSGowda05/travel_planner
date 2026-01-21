@@ -17,12 +17,6 @@ export function StatsGrid({ stats }) {
       color: "from-sky-500 to-indigo-500",
     },
     {
-      label: "Total Spent",
-      value: `₹${stats.totalSpent}`,
-      icon: Wallet,
-      color: "from-teal-500 to-cyan-600",
-    },
-    {
       label: "Favorite Destination",
       value: stats.favoriteDestination,
       icon: MapPin,

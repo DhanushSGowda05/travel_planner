@@ -56,12 +56,13 @@ def get_nearest_clusters(current_cluster_id, all_centers, top_n=2):
 def get_travel_cost(city_name: str, budget_type: str = "basic"):
     """
     Celery task to calculate travel cost using Google Gemini.
+    Falls back to ₹20,000 if Gemini fails.
     """
     print(f"--- [Task Started] Fetching estimate for: {city_name} ({budget_type}) ---")
 
+    BASE_FALLBACK_PRICE = 20000
+
     api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key:
-        return {"error": "GOOGLE_API_KEY not found in environment variables."}
 
     multipliers = {
         "basic": 1.0,
@@ -70,22 +71,35 @@ def get_travel_cost(city_name: str, budget_type: str = "basic"):
         "premium": 2.0,
         "luxury": 2.25
     }
-    
+
     budget_key = budget_type.lower().strip()
     multiplier = multipliers.get(budget_key, 1.0)
 
+    # ✅ Fallback response
+    def fallback():
+        return {
+            "city": city_name,
+            "budget_type": budget_type,
+            "base_avg": BASE_FALLBACK_PRICE,
+            "final_cost": round(BASE_FALLBACK_PRICE * multiplier, 2),
+            "currency": "INR",
+            "source": "fallback"
+        }
+
+    if not api_key:
+        return fallback()
+
     parser = PydanticOutputParser(pydantic_object=PriceEstimate)
-    
+
     template = """
     You are a travel expert. Calculate the daily BASE cost (Basic Budget) for a traveler in {city}.
     Include: 3 Meals, Local Transport, and Entry Fee for some tourist places.
-    Give me correct logical price
     Calculate the total cost in INDIAN RUPEES (INR).
-    
-    IMPORTANT: You must return strictly valid JSON matching the format below.
+
+    IMPORTANT: You must return strictly valid JSON.
     {format_instructions}
     """
-    
+
     prompt = PromptTemplate(
         template=template,
         input_variables=["city"],
@@ -94,38 +108,31 @@ def get_travel_cost(city_name: str, budget_type: str = "basic"):
 
     try:
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash", 
-            temperature=0.7, 
+            model="gemini-2.5-flash",
+            temperature=0.7,
             google_api_key=api_key
         )
 
         chain = prompt | llm | parser
-        prices = []
 
-        for i in range(3):
-            try:
-                result = chain.invoke({"city": city_name})
-                prices.append(result.cost_inr)
-            except Exception:
-                continue
+        # ✅ SINGLE Gemini call (no retries)
+        result = chain.invoke({"city": city_name})
 
-        if prices:
-            base_avg = sum(prices) / len(prices)
-            final_adjusted_cost = base_avg * multiplier
-            
-            result_data = {
-                "city": city_name,
-                "budget_type": budget_type,
-                "base_avg": round(base_avg, 2),
-                "final_cost": round(final_adjusted_cost, 2),
-                "currency": "INR"
-            }
-            return result_data
-        else:
-            return {"error": "Failed to retrieve prices from Gemini API."}
+        base_cost = result.cost_inr
+        final_adjusted_cost = base_cost * multiplier
 
-    except Exception as e:
-        return {"error": str(e)}
+        return {
+            "city": city_name,
+            "budget_type": budget_type,
+            "base_avg": round(base_cost, 2),
+            "final_cost": round(final_adjusted_cost, 2),
+            "currency": "INR",
+            "source": "gemini"
+        }
+
+    except Exception:
+        return fallback()
+
 
 
 @celery.task

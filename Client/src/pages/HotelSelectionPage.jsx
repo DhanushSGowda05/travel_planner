@@ -44,6 +44,20 @@ export default function HotelSelectionPage() {
       h.address.toLowerCase().includes(searchQuery.toLowerCase())
   );
 
+  const handleSkipHotel = async () => {
+    try {
+      await chooseHotel({
+        trip_id: tripId,
+        skip_hotel: true,
+      });
+
+      navigate(`/trip-itinerary/${tripId}`);
+    } catch (err) {
+      alert("Failed to skip hotel selection");
+    }
+  };
+
+
   const handleContinue = async () => {
     if (!selectedHotel) {
       alert("Please select a hotel");
@@ -109,11 +123,10 @@ export default function HotelSelectionPage() {
             {filteredHotels.map((hotel) => (
               <Card
                 key={hotel.id}
-                className={`cursor-pointer transition-all duration-200 ${
-                  selectedHotel?.id === hotel.id
+                className={`cursor-pointer transition-all duration-200 ${selectedHotel?.id === hotel.id
                     ? "ring-4 ring-teal-500 shadow-xl"
                     : "border-2 border-gray-200 hover:shadow-lg"
-                }`}
+                  }`}
                 onClick={() => setSelectedHotel(hotel)}
               >
                 <CardContent className="p-5 flex flex-col h-full">

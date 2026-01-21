@@ -1,147 +1,105 @@
-import { useState, useRef, useEffect } from "react";
-import { ChevronDown, ChevronRight } from "lucide-react";
-
-import PlaceCard from "./PlaceCard";
-import { AddPlaceInput } from "./AddPlaceInput";
+import { useState } from "react";
+import { ChevronDown, ChevronRight, Clock } from "lucide-react";
+import { PlaceCard } from "./PlaceCard";
 
 export default function DaySection({
   day,
   selectedPlaceId,
-  isEditMode,
   onSelectPlace,
-  onDeletePlace,
-  onAddPlace,
 }) {
   const [isExpanded, setIsExpanded] = useState(true);
-  const cardRefs = useRef({});
 
-  /* -----------------------------------
-     Auto-scroll to selected item
-  ----------------------------------- */
-  useEffect(() => {
-    if (!selectedPlaceId) return;
-
-    setIsExpanded(true);
-
-    const el = cardRefs.current[selectedPlaceId];
-    if (el) {
-      el.scrollIntoView({ behavior: "smooth", block: "center" });
-    }
-  }, [selectedPlaceId]);
-
-  /* -----------------------------------
-     Format date
-  ----------------------------------- */
-  const formattedDate = new Date(day.date).toLocaleDateString("en-US", {
+  const dateObj = new Date(day.date);
+  const formattedDate = dateObj.toLocaleDateString("en-US", {
     weekday: "long",
     month: "long",
     day: "numeric",
   });
 
+  // Total duration
+  const totalDuration = day.places.reduce(
+    (acc, p) => acc + (p.time_duration_hours || 0),
+    0
+  );
+  const hours = Math.floor(totalDuration);
+  const minutes = Math.round((totalDuration - hours) * 60);
+
   return (
-    <div className="bg-white rounded-xl border shadow-sm overflow-visible relative">
-
-      {/* HEADER */}
-      <div
-        className="flex items-center justify-between p-4 cursor-pointer hover:bg-gray-50"
+    <section
+      className="
+        rounded-2xl bg-white shadow-sm border
+        transition-all duration-300
+        hover:shadow-md
+      "
+    >
+      {/* ---------- HEADER ---------- */}
+      <button
         onClick={() => setIsExpanded(!isExpanded)}
+        className="
+          w-full flex items-center justify-between
+          px-6 py-5 text-left
+          rounded-2xl
+          hover:bg-slate-50
+          transition-colors
+        "
       >
-        <div className="flex items-center gap-3">
-          {isExpanded ? (
-            <ChevronDown className="w-5 h-5 text-gray-500" />
-          ) : (
-            <ChevronRight className="w-5 h-5 text-gray-500" />
-          )}
+        <div className="flex items-start gap-4">
+          <div className="mt-1 text-slate-400">
+            {isExpanded ? (
+              <ChevronDown className="w-5 h-5" />
+            ) : (
+              <ChevronRight className="w-5 h-5" />
+            )}
+          </div>
 
-          <h2 className="font-semibold text-lg text-gray-900">
-            {formattedDate}
-          </h2>
+          <div>
+            <h2 className="text-lg font-semibold text-slate-900">
+              {formattedDate}
+            </h2>
+            <div className="text-sm text-slate-500">
+              {day.day}
+            </div>
+          </div>
+        </div>
+
+        {totalDuration > 0 && (
+          <div className="flex items-center gap-2 text-sm text-slate-500">
+            <Clock className="w-4 h-4" />
+            {hours}h {minutes}m planned
+          </div>
+        )}
+      </button>
+
+      {/* ---------- CONTENT ---------- */}
+      <div
+        className={`
+          grid transition-all duration-300 ease-in-out
+          ${isExpanded ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"}
+        `}
+      >
+        <div className="overflow-hidden">
+          <div className="px-6 pb-6 pt-2">
+            {day.places.length > 0 ? (
+              <div className="space-y-4">
+                {day.places.map((place, index) => (
+                  <PlaceCard
+                    key={String(place.id)}
+                    place={place}
+                    index={index}
+                    isSelected={selectedPlaceId === String(place.id)}
+                    onSelect={() => onSelectPlace(place)}
+                    meals={place.id === "LUNCH_BREAK" ? day.meals : null}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="py-10 text-center text-sm text-slate-400">
+                No places added for this day yet
+              </div>
+            )}
+          </div>
         </div>
       </div>
-
-      {/* CONTENT */}
-      {isExpanded && (
-        <div className="px-4 pb-4 relative overflow-visible z-10">
-
-          {/* TIMELINE CARDS */}
-          {day.places.length > 0 ? (
-            <div className="space-y-4 mb-6">
-              {day.places.map((item, index) => {
-                const isMeal = item.type === "meal";
-
-                return (
-                  <div
-                    key={item.id}
-                    ref={(el) => (cardRefs.current[item.id] = el)}
-                  >
-                    {/* ---------- MEAL CARD ---------- */}
-                    {isMeal ? (
-                      <div
-                        onClick={() => onSelectPlace(item.id)}
-                        className={`
-                          cursor-pointer rounded-xl border p-4 transition
-                          ${
-                            selectedPlaceId === item.id
-                              ? "ring-2 ring-orange-400 border-orange-400"
-                              : "border-orange-300"
-                          }
-                          bg-orange-50
-                        `}
-                      >
-                        <div className="flex items-center gap-3 mb-1">
-                          <div className="w-8 h-8 rounded-full bg-orange-500 text-white flex items-center justify-center font-semibold">
-                            🍴
-                          </div>
-
-                          <h3 className="font-semibold text-gray-900">
-                            {item.name}
-                          </h3>
-
-                          <span className="ml-auto text-xs px-2 py-1 rounded-full bg-orange-200 text-orange-800">
-                            Food
-                          </span>
-                        </div>
-
-                        <p className="text-sm text-gray-600">
-                          {item.description || "Time for food and rest."}
-                        </p>
-
-                        <div className="mt-2 text-sm text-gray-500">
-                          {item.start_time} · {item.duration || "Break"}
-                        </div>
-                      </div>
-                    ) : (
-                      /* ---------- NORMAL PLACE CARD ---------- */
-                      <PlaceCard
-                        place={item}
-                        index={index}
-                        isSelected={selectedPlaceId === item.id}
-                        isEditMode={isEditMode}
-                        onSelect={() => onSelectPlace(item)}
-                        onDelete={() => onDeletePlace?.(item.id)}
-                      />
-                    )}
-                  </div>
-                );
-              })}
-            </div>
-          ) : (
-            <div className="text-center py-8 text-gray-500">
-              <p>No places added for this day.</p>
-              <p className="text-sm">Start by searching a place below.</p>
-            </div>
-          )}
-
-          {/* ADD PLACE INPUT */}
-          {isEditMode && (
-            <div className="relative z-30">
-              <AddPlaceInput
-                onAdd={(placeObj) => onAddPlace(day.id, placeObj)}
-              />
-            </div>
-          )}
-        </div>
-      )}
-    </div>
+    </section>
   );
 }
