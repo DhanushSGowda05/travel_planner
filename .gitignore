@@ -25,3 +25,12 @@ npm-debug.log*
 EOF
 # Local development secrets
 Server/.en
+
+# Local environment files and databases
+.env
+.env.*
+!.env.example
+!.env.sample
+Client/src/.env
+Server/instance/
+*.db
