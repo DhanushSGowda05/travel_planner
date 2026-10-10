@@ -1,0 +1,18 @@
+flask
+flask-cors
+python-dotenv
+requests
+
+# Async & background jobs
+celery
+redis
+
+# Data & clustering
+numpy
+pandas
+k-means-constrained
+
+# LLM / AI
+langchain-core
+langchain-google-genai
+pydantic

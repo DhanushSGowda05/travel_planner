@@ -1,0 +1,27 @@
+cat > .gitignore <<'EOF'
+# Environment secrets
+.env
+.env.*
+!.env.example
+!.env.sample
+
+# Dependencies
+node_modules/
+Client/node_modules/
+Server/node_modules/
+
+# Build output
+dist/
+build/
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS and editor files
+.DS_Store
+.vscode/
+EOF
+# Local development secrets
+Server/.en
