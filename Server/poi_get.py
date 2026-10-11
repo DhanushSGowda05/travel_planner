@@ -349,7 +349,7 @@ def search_mandatory_place(place_name, city):
     clean_name = place_name.strip()
     if not SERPAPI_KEY:
         raise ValueError("SERPAPI_KEY is not set. Cannot search for places.")
-    response = requests.get(
+    response = serpapi_session.get(
         "https://serpapi.com/search",
         params={
             "engine": "google_maps",
@@ -360,7 +360,7 @@ def search_mandatory_place(place_name, city):
             "api_key": SERPAPI_KEY,
             "num": 5,
         },
-        timeout=5,
+        timeout=(5, 15),
     )
     response.raise_for_status()
     results = _local_results(response)

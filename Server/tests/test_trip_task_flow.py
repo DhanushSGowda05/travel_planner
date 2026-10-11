@@ -2073,7 +2073,7 @@ class PlaceValidationTests(unittest.TestCase):
         self.assertIn("Mumbai", params["q"])
 
     @patch.object(poi_get, "SERPAPI_KEY", "test-key")
-    @patch.object(poi_get.requests, "get")
+    @patch.object(poi_get.serpapi_session, "get")
     def test_mandatory_search_does_not_accept_wrong_city_or_fabricate_place(
         self, get_request
     ):
@@ -2148,7 +2148,7 @@ class PlaceValidationTests(unittest.TestCase):
         )
 
     @patch.object(poi_get, "SERPAPI_KEY", "test-key")
-    @patch.object(poi_get.requests, "get")
+    @patch.object(poi_get.serpapi_session, "get")
     def test_mandatory_search_rejects_wrong_name_in_correct_city(self, get_request):
         response = Mock()
         response.json.return_value = {
