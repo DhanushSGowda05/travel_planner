@@ -2207,5 +2207,121 @@ class ErrorRedactionTests(unittest.TestCase):
         self.assertNotIn("fake-bearer-token-456", "\n".join(captured_logs.output))
         self.assertIn("[REDACTED]", "\n".join(captured_logs.output))
 
+
+
+class TripPreferenceInterpreterTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        main.app.config.update(TESTING=True, LOGIN_DISABLED=False)
+        with main.app.app_context():
+            main.db.create_all()
+
+    @classmethod
+    def tearDownClass(cls):
+        with main.app.app_context():
+            main.db.session.remove()
+            main.db.drop_all()
+
+    def setUp(self):
+        with main.app.app_context():
+            main.db.session.remove()
+            main.db.drop_all()
+            main.db.create_all()
+            user = main.User(name="Test User", email="test@example.com")
+            user.set_password("test-password")
+            main.db.session.add(user)
+            main.db.session.commit()
+
+        self.client = main.app.test_client()
+        response = self.client.post(
+            "/login",
+            json={"email": "test@example.com", "password": "test-password"},
+        )
+        self.assertEqual(response.status_code, 200)
+
+    def test_rejects_missing_description(self):
+        response = self.client.post("/interpret_trip_preferences", json={})
+        self.assertEqual(response.status_code, 400)
+
+    def test_rejects_blank_description(self):
+        response = self.client.post(
+            "/interpret_trip_preferences", json={"description": "   "}
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_rejects_oversized_description(self):
+        response = self.client.post(
+            "/interpret_trip_preferences",
+            json={"description": "x" * 4001},
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_requires_authentication(self):
+        response = main.app.test_client().post(
+            "/interpret_trip_preferences",
+            json={"description": "A relaxed trip to Mysuru"},
+        )
+        self.assertEqual(response.status_code, 401)
+
+    def test_returns_normalized_valid_preferences(self):
+        import json
+
+        model_result = {
+            "origin_city": "Bengaluru",
+            "destination_city": "Mysuru",
+            "duration_days": 3,
+            "start_date": None,
+            "end_date": None,
+            "num_people": 2,
+            "budget_type": "Economy",
+            "budget_amount": None,
+            "preferences": ["history", "museum"],
+            "dislikes": ["sports"],
+            "mandatory_places": ["Mysore Palace"],
+            "food_preference": "Veg-Only",
+            "pace": "Relaxed",
+        }
+        fake_response = Mock(content=json.dumps(model_result))
+        fake_llm = Mock()
+        fake_llm.invoke.return_value = fake_response
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_API_KEY": "test-api-key"}),
+            patch(
+                "langchain_core.prompts.ChatPromptTemplate.from_messages"
+            ) as prompt_factory,
+            patch.object(main, "ChatGoogleGenerativeAI", return_value=Mock()) as llm_factory,
+        ):
+            prompt = prompt_factory.return_value
+            prompt.__or__ = Mock(return_value=fake_llm)
+
+            response = self.client.post(
+                "/interpret_trip_preferences",
+                json={
+                    "description": (
+                        "Three relaxed days in Mysuru with history, museums, "
+                        "vegetarian food, and Mysore Palace."
+                    )
+                },
+            )
+
+        self.assertEqual(response.status_code, 200, response.get_json())
+        interpreted = response.get_json()["preferences"]
+        self.assertEqual(interpreted["destination_city"], "Mysuru")
+        self.assertEqual(interpreted["preferences"], ["history", "museums"])
+        self.assertEqual(interpreted["food_preference"], "Veg-Only")
+        self.assertEqual(interpreted["pace"], "Relaxed")
+        self.assertEqual(interpreted["mandatory_places"], ["Mysore Palace"])
+        llm_factory.assert_called_once()
+
+    def test_returns_service_unavailable_without_api_key(self):
+        with patch.dict(os.environ, {"GOOGLE_API_KEY": ""}):
+            response = self.client.post(
+                "/interpret_trip_preferences",
+                json={"description": "A relaxed trip to Mysuru"},
+            )
+        self.assertEqual(response.status_code, 503)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -87,7 +87,7 @@ def clean_schedule_text(schedule_data):
 
 def get_detailed_hours(place):
     """Extracts or estimates opening/closing hours using multiple strategies."""
-    
+
     # Strategy 1: Operating Hours (Most Detailed)
     operating_hours = place.get('operating_hours')
     if operating_hours:
@@ -105,7 +105,7 @@ def get_detailed_hours(place):
             if not data: continue
             first_idx = next((i for i, x in enumerate(data) if x > 0), None)
             last_idx = next((i for i, x in enumerate(reversed(data)) if x > 0), None)
-            
+
             if first_idx is not None and last_idx is not None:
                 start_hours.append(first_idx)
                 end_hours.append((23 - last_idx) + 1)
@@ -114,21 +114,21 @@ def get_detailed_hours(place):
             try:
                 common_start = mode(start_hours)
                 common_end = mode(end_hours)
-                
+
                 # Format the estimated schedule for the JSON output
                 if common_start == 0 and common_end >= 24:
                     schedule_text = "Open 24 Hours (Estimated)"
                 else:
                     schedule_text = f"Opens at {format_time_str(common_start)} and Closes at {format_time_str(common_end)} (Estimated)"
-                
+
                 return {"full_schedule": schedule_text}
             except StatisticsError:
-                pass 
+                pass
 
     # Strategy 3: Text Parsing (Fallback)
     text = place.get('open_state', '')
     if not text: return {"full_schedule": "Hours not available"}
-    
+
     return {"full_schedule": text}
 
 def estimate_native_price(place_name, category):
@@ -148,18 +148,18 @@ def estimate_native_price(place_name, category):
     if 'adventure' in cat or 'wonderla' in name: return 1200
     if any(k in name for k in ['fort', 'palace', 'museum']): return 40
     if any(k in name for k in ['park', 'garden', 'lake']): return 20
-    
+
     return 0
 
 def estimate_time_to_spend(place_name, category):
     """
     Estimates time needed based on category and name and returns a usable float (in hours).
-    
+
     Returns: float (e.g., 2.5 for 2-3 hours)
     """
     cat = category.lower()
     name = place_name.lower()
-    
+
     # Logic to return the midpoint or a sensible number in hours (float)
     if any(k in cat for k in ["zoo", "wildlife", "adventure"]): return 3.5  # 3-4 hours
     if any(k in cat for k in ["museum", "history", "fort", "malls", "trekking", "entertainment"]): return 2.5  # 2-3 hours
@@ -173,10 +173,10 @@ def calculate_smart_score(place, is_mandatory, is_hidden_gem):
     reviews = place.get('reviews', 0)
     # Score = Rating * log10(Reviews + 1)
     popularity_score = rating * math.log10(reviews + 1) if reviews > 0 else 0
-    
+
     boost = 0
     # Mandatory places get a huge score boost to ensure they are always at the top
-    if is_mandatory: boost = 1000000 
+    if is_mandatory: boost = 1000000
     elif is_hidden_gem: boost = 15
     return round(popularity_score + boost, 2)
 
@@ -227,6 +227,8 @@ def place_matches_destination(place, destination):
     city_aliases = {
         "mangalore": {"mangalore", "mangaluru"},
         "mangaluru": {"mangalore", "mangaluru"},
+        "mysore": {"mysore", "mysuru"},
+        "mysuru": {"mysore", "mysuru"},
     }
 
     destination_city = destination_parts[0]
@@ -255,36 +257,73 @@ def place_matches_destination(place, destination):
     )
 
 
-
 def place_matches_name(place, requested_name, destination):
-    """Require a normalized title match after removing trailing destination parts."""
+    """Match place titles while allowing known city-name variants."""
     title = place.get("title")
     if not isinstance(title, str) or not title.strip():
         return False
 
     def normalize(value):
-        return " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
+        return " ".join(
+            re.sub(r"[^a-z0-9]+", " ", value.lower()).split()
+        )
+
+    def normalize_place_name(value):
+        normalized = normalize(value)
+        words = normalized.split()
+        aliases = {"mysore": "mysuru", "mangalore": "mangaluru"}
+        return " ".join(aliases.get(word, word) for word in words)
 
     requested_parts = [
-        normalize(part) for part in requested_name.split(",") if normalize(part)
+        normalize(part)
+        for part in requested_name.split(",")
+        if normalize(part)
     ]
     destination_parts = {
-        normalize(part) for part in destination.split(",") if normalize(part)
+        normalize(part)
+        for part in destination.split(",")
+        if normalize(part)
     }
-    while len(requested_parts) > 1 and requested_parts[-1] in destination_parts:
+
+    while (
+        len(requested_parts) > 1
+        and requested_parts[-1] in destination_parts
+    ):
         requested_parts.pop()
 
-    return normalize(title) == " ".join(requested_parts)
-
+    requested = " ".join(requested_parts)
+    return normalize_place_name(title) == normalize_place_name(requested)
 
 def _local_results(response):
-    payload = response.json()
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ValueError(
+            "SerpAPI returned a non-JSON response while searching for places."
+        ) from exc
+
     if not isinstance(payload, dict):
-        raise ValueError("Google Maps API returned an invalid response object.")
+        raise ValueError("SerpAPI returned an invalid response object.")
+
+    if payload.get("error"):
+        raise ValueError(f"SerpAPI place search failed: {payload['error']}")
+
+    # Google Maps exact-place searches can return a single place
+    # under place_results rather than a list under local_results.
+    place_result = payload.get("place_results")
+    if isinstance(place_result, dict):
+        return [place_result]
+
     results = payload.get("local_results")
-    if not isinstance(results, list):
-        raise ValueError("Google Maps API returned an invalid local_results value.")
-    return results
+    if isinstance(results, list):
+        return results
+
+    raise ValueError(
+        "SerpAPI response contained neither valid place_results "
+        "nor a local_results list."
+    )
+
+
 
 
 # ==========================================
@@ -336,7 +375,7 @@ def get_places_by_category(category_key, city):
     """Searches for places based on a preference category."""
     if not SERPAPI_KEY:
         raise ValueError("SERPAPI_KEY is not set. Cannot search for places.")
-        
+
     config = ALL_PREFERENCES[category_key]
     url = "https://serpapi.com/search"
     params = {
@@ -365,6 +404,7 @@ def get_places_by_category(category_key, city):
         if not place_matches_destination(result, city):
             rejected += 1
             continue
+
         if extract_valid_coordinates(result) is None:
             rejected += 1
             continue
@@ -391,21 +431,21 @@ def get_places_by_category(category_key, city):
 def process_final_list(places, disliked_categories, city):
     """Deduplicates, filters, enriches data, and finalizes the list into the requested clean structured format."""
     unique_map = {}
-    
+
     # Sort initially to ensure mandatory places are processed first for proper deduplication
     sorted_places = sorted(places, key=lambda x: x.get('is_mandatory', False), reverse=True)
-    
+
     for p in sorted_places:
         key = p.get('title', '').lower().strip()
-        if key and key not in unique_map: 
+        if key and key not in unique_map:
             unique_map[key] = p
-            
+
     final_list_unsorted = []
-    
+
     for p in unique_map.values():
         is_mandatory = p.get('is_mandatory', False)
         category = p.get('preference_category', '').lower()
-        
+
         # Filter: Skip non-mandatory places whose category is disliked
         if not is_mandatory and category in disliked_categories:
             continue
@@ -421,15 +461,15 @@ def process_final_list(places, disliked_categories, city):
                 raise ValueError(message)
             logger.warning("Skipping %s", message)
             continue
-            
+
         # Enrich Data
         # 1. Score calculation
         is_hidden_gem = p.get('is_hidden_gem', False)
         p['smart_score'] = calculate_smart_score(p, is_mandatory, is_hidden_gem)
-        
+
         # 2. Time estimation (returns float)
         time_hours = estimate_time_to_spend(p.get('title', ''), category)
-        
+
         p['native_price'] = estimate_native_price(p.get('title', ''), category)
         # 3. Schedule details
         hours_data = get_detailed_hours(p)
@@ -502,22 +542,22 @@ def process_final_list(places, disliked_categories, city):
             'latitude': coordinates[0],
             'longitude': coordinates[1],
             'address': p.get('address', 'Address not available'),
-            'time_duration_hours': time_hours, 
+            'time_duration_hours': time_hours,
             'smart_score': p['smart_score'],
             'schedule': cleaned_schedule,
             'price':p["native_price"] ,
             'is_mandatory': is_mandatory,
         })
-        
+
     # Sort the list by smart_score in descending order (highest score first)
     final_list_unsorted.sort(key=lambda x: x['smart_score'], reverse=True)
-    
+
     # Add the final 'id' variable after sorting
     final_list_with_id = []
     for i, place in enumerate(final_list_unsorted, 1):
         place['id'] = i  # Add the 1-based index as 'id'
         final_list_with_id.append(place)
-        
+
     return final_list_with_id
 
 def generate_output_structure(places, city):
@@ -534,23 +574,23 @@ def generate_output_structure(places, city):
 # ==========================================
 
 def run_travel_planner_external(
-    city_name: str, 
+    city_name: str,
     num_of_days: int = 1, # New parameter added
-    mandatory_list: list = None, 
-    liked_categories: list = None, 
+    mandatory_list: list = None,
+    liked_categories: list = None,
     disliked_categories: list = None
 ) -> dict:
     """
-    Core function to run the travel planner logic with specific inputs, 
+    Core function to run the travel planner logic with specific inputs,
     limited to 10 * num_of_days places.
-    
+
     Args:
         city_name (str): The city name (e.g., "Delhi").
         num_of_days (int): The duration of the trip. Limits the final output to 10 * num_of_days places.
         mandatory_list (list): List of required place names (e.g., ["Red Fort"]).
         liked_categories (list): List of preferred category keys (e.g., ["history", "museums"]).
         disliked_categories (list): Optional list of categories to explicitly exclude.
-        
+
     Returns:
         dict: The final structured itinerary data with clean keys/values.
     """
@@ -560,35 +600,35 @@ def run_travel_planner_external(
         raise ValueError("City name cannot be empty.")
     if not isinstance(num_of_days, int) or num_of_days < 1:
         raise ValueError("num_of_days must be an integer greater than 0.")
-        
+
     # Clean and normalize inputs
     mandatory_list = [m.strip() for m in (mandatory_list or [])]
     liked_categories = [k.lower().strip() for k in (liked_categories or [])]
     disliked_categories = [k.lower().strip() for k in (disliked_categories or [])]
-    
+
     raw_places = []
     keys = list(ALL_PREFERENCES.keys())
-    
+
     # 1. Search Mandatory Places
     for name in mandatory_list:
         raw_places.append(search_mandatory_place(name, city_name))
         time.sleep(0.5)
-        
+
     # 2. Fetch Selected Preferences
     for pref in liked_categories:
         if pref in ALL_PREFERENCES:
             raw_places.extend(get_places_by_category(pref, city_name))
             time.sleep(0.5)
-        
-    # 3. Fetch Hidden Gems 
+
+    # 3. Fetch Hidden Gems
     unselected_prefs = [k for k in keys if k not in liked_categories]
     gem_scan_prefs = [k for k in unselected_prefs if k not in disliked_categories]
-    
-    for pref in gem_scan_prefs[:3]: 
+
+    for pref in gem_scan_prefs[:3]:
         res = get_places_by_category(pref, city_name)
         # Gem Filter: high rating (>= 4.6) AND high reviews (> 2000)
         gems = [p for p in res if p.get('rating', 0) >= 4.6 and p.get('reviews', 0) > 2000]
-        for g in gems[:1]: 
+        for g in gems[:1]:
             g['is_hidden_gem'] = True
             raw_places.append(g)
         time.sleep(0.5)
@@ -597,13 +637,13 @@ def run_travel_planner_external(
     final_itinerary_list = process_final_list(
         raw_places, disliked_categories, city_name
     )
-    
+
     # 5. Limit the list based on num_of_days
     max_places = 5 * num_of_days
-    
+
     # Since the list is already sorted by smart_score, slicing takes the "top" places
     limited_list = final_itinerary_list[:max_places]
-    
+
     # 6. Generate final output structure
     return generate_output_structure(limited_list, city_name)
 
@@ -613,18 +653,18 @@ def run_travel_planner_external(
 
 if __name__ == "__main__":
     print("--- Running External API Demo ---")
-    
+
     # --- Define Inputs for Testing ---
     TEST_CITY = "Udaipur"
     TEST_MANDATORY = ["City Palace, Udaipur", "Jagdish Temple"] # Added another mandatory place
     TEST_LIKES = ["history", "lakes"] # Removed 'spiritual' to see a different mix
-    TEST_DISLIKES = ["sports", "entertainment"] 
+    TEST_DISLIKES = ["sports", "entertainment"]
     TEST_DAYS = 2  # Max places: 20
     # ---------------------------------
-    
+
     try:
         print(f"Generating itinerary for {TEST_CITY} for {TEST_DAYS} days...")
-        
+
         final_data = run_travel_planner_external(
             city_name=TEST_CITY,
             num_of_days=TEST_DAYS,
@@ -638,7 +678,7 @@ if __name__ == "__main__":
         print(f"Expected Max Places: {10 * TEST_DAYS}. Actual Places: {final_data['total_places']}")
         print(json.dumps(final_data, indent=4))
         print("=" * 80)
-        
+
         # Quick check for IDs
         if final_data['places']:
             print(f"First Place ID: {final_data['places'][0]['id']}")

@@ -17,6 +17,29 @@ export async function createTrip(payload) {
 }
 
 /* -----------------------------------------------------
+   INTERPRET NATURAL-LANGUAGE TRIP PREFERENCES
+----------------------------------------------------- */
+export async function interpretTripPreferences(description) {
+  const res = await fetch(`${BASE}/interpret_trip_preferences`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({ description }),
+  });
+
+  const data = await res.json();
+
+  if (!res.ok) {
+    throw new Error(
+      data.error || "Failed to interpret trip preferences"
+    );
+  }
+
+  return data.preferences;
+}
+
+
+/* -----------------------------------------------------
    UPDATE TRANSPORT NEED + TYPE
 ----------------------------------------------------- */
 export async function updateTransport(payload) {
