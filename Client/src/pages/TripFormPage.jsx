@@ -1,30 +1,31 @@
+
 import React, { useState, useMemo } from "react";
 import { useNavigate } from "react-router-dom";
 import { createTrip } from "../services/tripService";
+
+// Static options — declared outside the component
+const BUDGET_TYPES = ["Basic", "Economy", "Standard", "Premium", "Luxury"];
+
+const PREFERENCES_LIST = [
+  "history",
+  "spiritual",
+  "museum",
+  "parks",
+  "wildlife",
+  "lakes",
+  "adventure",
+  "malls",
+  "markets",
+  "entertainment",
+  "trekking",
+  "sports",
+];
 
 export default function TripFormPage() {
   const navigate = useNavigate();
   const [loading, setLoading] = useState(false);
 
-  // OPTIONS
-  const BUDGET_TYPES = ["Basic", "Economy", "Standard", "Premium", "Luxury"];
-
-  const PREFERENCES_LIST = [
-    "history",
-    "spiritual",
-    "museum",
-    "parks",
-    "wildlife",
-    "lakes",
-    "adventure",
-    "malls",
-    "markets",
-    "entertainment",
-    "trekking",
-    "sports",
-  ];
-
-  const [budgetMode, setBudgetMode] = useState("type"); // "type" | "amount"
+  const [budgetMode, setBudgetMode] = useState("type");
 
   const [form, setForm] = useState({
     origin_city: "",

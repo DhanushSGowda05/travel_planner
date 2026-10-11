@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 import { useNavigate, Link } from "react-router-dom";
 
 export default function SignUp() {
@@ -18,12 +18,17 @@ export default function SignUp() {
     setLoading(true);
     setErrors(null);
 
-    const res = await signup(form.name, form.email, form.password);
-
-    if (res.success) navigate("/dashboard");
-    else setErrors(res.errors);
-
-    setLoading(false);
+    try {
+      const res = await signup(form.name, form.email, form.password);
+      if (res.success) navigate("/dashboard");
+      else setErrors(res.errors);
+    } catch {
+      setErrors({
+        network: ["Unable to create your account. Check your connection and try again."],
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (

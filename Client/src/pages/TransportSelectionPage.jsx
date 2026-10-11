@@ -1,5 +1,4 @@
-import React, { useEffect, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import React, { useCallback, useEffect, useState } from "react";import { useParams, useNavigate } from "react-router-dom";
 import TransportComparison from "../components/TransportComparison";
 import {
     getTransportOptions,
@@ -15,9 +14,7 @@ export default function TransportSelectionPage() {
     const [options, setOptions] = useState([]);
     const [selected, setSelected] = useState(null);
 
-    useEffect(() => {
-        loadOptions("a");
-    }, []);
+
 
     const normalize = (items, type, idKey, nameKey) =>
         items.map((i) => ({
@@ -42,14 +39,19 @@ export default function TransportSelectionPage() {
             code: i[idKey],
         }));
 
-    const loadOptions = async (a_d) => {
-        const data = await getTransportOptions({ trip_id: tripId, a_d });
-        setOptions([
-            ...normalize(data.bus, "bus", "bus_id", "bus_name"),
-            ...normalize(data.train, "train", "train_id", "train_name"),
-            ...normalize(data.flight, "flight", "flight_id", "flight_name"),
-        ]);
-    };
+    const loadOptions = useCallback(async (a_d) => {
+    const data = await getTransportOptions({ trip_id: tripId, a_d });
+    setOptions([
+        ...normalize(data.bus, "bus", "bus_id", "bus_name"),
+        ...normalize(data.train, "train", "train_id", "train_name"),
+        ...normalize(data.flight, "flight", "flight_id", "flight_name"),
+    ]);
+}, [tripId]);
+
+    useEffect(() => {
+    Promise.resolve().then(() => loadOptions("a"));
+}, [loadOptions]);
+
 
     const handleNext = async () => {
         if (!selected) {

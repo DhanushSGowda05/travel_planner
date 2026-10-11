@@ -26,15 +26,30 @@ print(f"--- Processing Data for {K} Days ---")
 
 # Convert places to DataFrame
 df = pd.DataFrame(input_data['places'])
-total_places = len(df)
+required_cols = {'id', 'is_mandatory', 'latitude', 'longitude'}
+missing_cols = required_cols - set(df.columns)
+if missing_cols:
+    raise ValueError(
+        f"Place data is missing required clustering columns: "
+        f"{', '.join(sorted(missing_cols))}."
+    )
 
-# Ensure required columns exist
-required_cols = ['score', 'is_mandatory', 'latitude', 'longitude']
-for col in required_cols:
-    if col not in df.columns:
-        if col == 'is_mandatory': df[col] = False
-        elif col == 'latitude': df[col] = 0.0
-        elif col == 'longitude': df[col] = 0.0
+df['is_mandatory'] = df['is_mandatory'].fillna(False).astype(bool)
+coordinates = df[['latitude', 'longitude']].apply(pd.to_numeric, errors='coerce')
+valid_coordinates = (
+    np.isfinite(coordinates).all(axis=1)
+    & coordinates['latitude'].between(-90, 90)
+    & coordinates['longitude'].between(-180, 180)
+    & ~(coordinates['latitude'].eq(0) & coordinates['longitude'].eq(0))
+)
+if (~valid_coordinates & df['is_mandatory']).any():
+    raise ValueError("A mandatory place has invalid coordinates.")
+df = df.loc[valid_coordinates].copy()
+coordinates = coordinates.loc[valid_coordinates]
+if df.empty:
+    raise ValueError("No places with valid coordinates are available.")
+df[['latitude', 'longitude']] = coordinates.astype(float)
+total_places = len(df)
 
 # Extract Features for Clustering
 X = df[['latitude', 'longitude']]

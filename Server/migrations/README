@@ -1,0 +1,16 @@
+# Database migrations
+
+This project did not previously have a migration workflow. Flask-Migrate/Alembic
+is now configured for versioned schema changes; application startup does not
+apply migrations automatically.
+
+After reviewing the migration and backing up the configured database, apply it
+manually from `Server/`:
+
+```sh
+flask --app main:app db upgrade
+```
+
+The task-tracking migration only adds nullable columns to `trip`. Its downgrade
+removes only those newly added columns. Do not downgrade after task metadata has
+been written unless that metadata loss is acceptable and explicitly approved.

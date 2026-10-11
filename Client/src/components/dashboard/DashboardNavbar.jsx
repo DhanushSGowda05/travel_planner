@@ -1,7 +1,7 @@
 import React from "react";
 import { Plane } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { useAuth } from "../../context/AuthContext";
+import { useAuth } from "../../context/useAuth";
 
 export function DashboardNavbar() {
   const { logout, user } = useAuth();

@@ -1,9 +1,13 @@
 import json
 import os
-import time
-from datetime import datetime, timedelta,date, time as dt_time
+import sys
+import traceback
+from datetime import datetime, timedelta, date, time as dt_time, timezone
+from uuid import uuid4
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+from sqlalchemy.exc import IntegrityError
 from flask_login import (
     LoginManager,
     UserMixin,
@@ -18,6 +22,19 @@ from pydantic import BaseModel, EmailStr, ValidationError, field_validator, mode
 from threading import Lock
 from typing import List, Optional, Literal 
 from tasks import perform_clustering, get_travel_cost
+from clustering_validation import validate_clustering_result
+from safe_errors import sanitize_error_message
+from workflow_ledger import (
+    MAX_WORK_ATTEMPTS,
+    SOLVER_ATTEMPTS_EXHAUSTED_MESSAGE,
+    enqueue_work,
+    fail_expired_solver_if_exhausted,
+    fail_solver,
+    finish_solver,
+    start_heartbeat,
+    claim_solver,
+    utc_now,
+)
 from celery.result import AsyncResult
 import tasks # Import the module to access the celery instance config if needed
 import pandas as pd
@@ -25,10 +42,12 @@ import numpy as np
 from flask import request
 
 
+if __name__ == "__main__":
+    sys.modules["main"] = sys.modules[__name__]
+
+
 # CHANGED: Removed FlaskForm, wtforms, and CSRFProtect imports
 
-t={}
-t_r={}
 ilp_locks = {}
 ilp_locks_guard = Lock()
 
@@ -52,17 +71,27 @@ app.config["SQLALCHEMY_TRACK_MODIFICATIONS"] = False
 
 # --- INITIALIZE EXTENSIONS ---
 db = SQLAlchemy(app)
+migrate = Migrate(app, db)
 
-# This is critical for React:
-#   - CORS(app): Allows all origins (e.g., localhost:3000)
-#   - supports_credentials=True: Allows Flask to send the session cookie
-#     to your React app.
+# Credentialed CORS requires explicit origins; do not use a wildcard here.
 CORS(
     app,
     supports_credentials=True,
-    resources={ r"/*": {"origins": ["http://127.0.0.1:5173", "http://localhost:5173"]}},
+    resources={
+        r"/*": {
+            "origins": [
+                "http://127.0.0.1:5173",
+                "http://localhost:5173",
+                "http://127.0.0.1:5174",
+                "http://localhost:5174",
+                "http://127.0.0.1:5175",
+                "http://localhost:5175",
+            ],
+            "methods": ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+            "allow_headers": ["Content-Type"],
+        }
+    },
 )
-
 login_manager = LoginManager()
 login_manager.init_app(app)
 
@@ -124,6 +153,404 @@ class Trip(db.Model):
     hotel_lat = db.Column(db.Float, nullable=True)
     hotel_long = db.Column(db.Float, nullable=True)
     hotel_price = db.Column(db.Float, nullable=True)
+
+    clustering_task_id = db.Column(db.String(36), nullable=True)
+    clustering_status = db.Column(db.String(20), nullable=True)
+    clustering_error = db.Column(db.Text, nullable=True)
+    budget_task_id = db.Column(db.String(36), nullable=True)
+    budget_status = db.Column(db.String(20), nullable=True)
+    budget_error = db.Column(db.Text, nullable=True)
+    itinerary_status = db.Column(db.String(20), nullable=True)
+    itinerary_error = db.Column(db.Text, nullable=True)
+
+
+class TripWork(db.Model):
+    __tablename__ = "trip_work"
+    __table_args__ = (
+        db.UniqueConstraint("trip_id", "workflow", name="uq_trip_work_trip_workflow"),
+        db.Index("ix_trip_work_dispatch", "state", "next_attempt_at"),
+        db.Index("ix_trip_work_lease", "state", "lease_expires_at"),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    trip_id = db.Column(
+        db.Integer,
+        db.ForeignKey("trip.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    workflow = db.Column(db.String(20), nullable=False)
+    state = db.Column(db.String(24), nullable=False)
+    generation = db.Column(db.Integer, nullable=False, default=1)
+    celery_task_id = db.Column(db.String(36), nullable=True)
+    attempt_count = db.Column(db.Integer, nullable=False, default=0)
+    dispatch_attempt_count = db.Column(db.Integer, nullable=False, default=0)
+    enqueued_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    dispatched_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    dispatch_lease_until = db.Column(db.DateTime(timezone=True), nullable=True)
+    started_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    heartbeat_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    lease_expires_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    completed_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    next_attempt_at = db.Column(db.DateTime(timezone=True), nullable=True)
+    result = db.Column(db.JSON, nullable=True)
+    error_code = db.Column(db.String(64), nullable=True)
+    error_message = db.Column(db.Text, nullable=True)
+    created_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+    )
+    updated_at = db.Column(
+        db.DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )
+
+
+def _task_snapshot(trip, task_name):
+    task_fields = {
+        "clustering": (
+            "clustering_task_id",
+            "clustering_status",
+            "clustering_error",
+        ),
+        "budget": ("budget_task_id", "budget_status", "budget_error"),
+    }
+    id_field, status_field, error_field = task_fields[task_name]
+    task_id = getattr(trip, id_field)
+    stored_status = getattr(trip, status_field) or "NOT_STARTED"
+    error = sanitize_error_message(getattr(trip, error_field) or "") or None
+    result_value = None
+
+    for _ in range(3):
+        work = TripWork.query.filter_by(
+            trip_id=trip.id,
+            workflow=task_name,
+        ).first()
+        if work is None:
+            break
+        state_map = {
+            "QUEUED": "PENDING",
+            "RUNNING": "STARTED",
+            "SUCCEEDED": "SUCCESS",
+            "FAILED": "FAILURE",
+            "RESULT_UNAVAILABLE": "RESULT_UNAVAILABLE",
+        }
+        state = state_map.get(work.state, "FAILURE")
+        error = sanitize_error_message(work.error_message or "") or None
+        error_code = work.error_code
+        result_value = work.result
+        validation_error = None
+        if state == "SUCCESS" and result_value is None:
+            validation_error = (
+                "The successful task result is unavailable.",
+                "RESULT_MISSING",
+            )
+        elif state == "SUCCESS" and task_name == "clustering":
+            try:
+                validate_clustering_result(result_value)
+            except ValueError as validation_exception:
+                validation_error = (
+                    sanitize_error_message(validation_exception),
+                    "RESULT_INVALID",
+                )
+        elif state == "SUCCESS" and task_name == "budget":
+            try:
+                final_cost = float(result_value["final_cost"])
+                if not np.isfinite(final_cost) or final_cost <= 0:
+                    raise ValueError
+            except (KeyError, TypeError, ValueError):
+                validation_error = (
+                    "Budget task result is invalid.",
+                    "RESULT_INVALID",
+                )
+
+        if validation_error is not None:
+            error, error_code = validation_error
+            updated = (
+                TripWork.query.filter_by(
+                    id=work.id,
+                    workflow=task_name,
+                    state="SUCCEEDED",
+                    generation=work.generation,
+                    celery_task_id=work.celery_task_id,
+                )
+                .update(
+                    {
+                        "state": "RESULT_UNAVAILABLE",
+                        "error_code": error_code,
+                        "error_message": error,
+                    },
+                    synchronize_session=False,
+                )
+            )
+            if updated == 1:
+                setattr(trip, status_field, "RESULT_UNAVAILABLE")
+                setattr(trip, error_field, error)
+                db.session.commit()
+                state = "RESULT_UNAVAILABLE"
+                result_value = None
+            else:
+                db.session.rollback()
+                continue
+
+        return {
+            "task_id": work.celery_task_id or task_id,
+            "status": state,
+            "error": error,
+        }, result_value
+
+    if task_id:
+        result = AsyncResult(task_id, app=tasks.celery)
+        state = result.state or "PENDING"
+        if state == "PENDING" and stored_status == "SUCCESS":
+            state = "RESULT_UNAVAILABLE"
+            error = (
+                "This task was previously recorded as successful, but its "
+                "result is unavailable from Celery. Retry the task to continue."
+            )
+        elif state == "PENDING" and stored_status == "RESULT_UNAVAILABLE":
+            state = stored_status
+            error = error or (
+                "This task was previously recorded as successful, but its "
+                "result is unavailable from Celery. Retry the task to continue."
+            )
+        elif state == "PENDING" and stored_status == "FAILURE":
+            state = "FAILURE"
+            error = error or "The task previously failed."
+        elif state == "SUCCESS":
+            result_value = result.result
+            if result_value is None:
+                state = "FAILURE"
+                error = "The task completed without returning a result."
+            elif isinstance(result_value, dict) and result_value.get("error"):
+                state = "FAILURE"
+                error = sanitize_error_message(result_value["error"])
+            elif task_name == "clustering":
+                try:
+                    validate_clustering_result(result_value)
+                except ValueError as validation_error:
+                    state = "FAILURE"
+                    error = sanitize_error_message(validation_error)
+                    result_value = None
+                else:
+                    error = None
+            elif task_name == "budget":
+                try:
+                    final_cost = float(result_value["final_cost"])
+                    if not np.isfinite(final_cost) or final_cost <= 0:
+                        raise ValueError
+                    error = None
+                except (KeyError, TypeError, ValueError):
+                    state = "FAILURE"
+                    error = "Budget task returned an invalid final_cost."
+            else:
+                error = None
+        elif state == "FAILURE":
+            error = sanitize_error_message(result.result)
+        elif state == "RETRY":
+            error = (
+                sanitize_error_message(result.result)
+                if result.result
+                else "Task retry scheduled."
+            )
+        elif state == "REVOKED":
+            state = "FAILURE"
+            error = (
+                sanitize_error_message(result.result)
+                if result.result
+                else "Task was revoked."
+            )
+        elif state not in {"PENDING", "STARTED", "SUCCESS", "FAILURE"}:
+            error = f"Task ended with unexpected state: {state}."
+            state = "FAILURE"
+        else:
+            error = None
+
+    else:
+        state = stored_status
+
+    return {
+        "task_id": task_id,
+        "status": state,
+        "error": error,
+    }, result_value
+
+
+def _valid_saved_itinerary(daily_plan, allow_empty=False):
+    if not isinstance(daily_plan, dict):
+        return False
+    if not daily_plan:
+        return allow_empty
+    for day_key, day_plan in daily_plan.items():
+        if (
+            not isinstance(day_key, str)
+            or not isinstance(day_plan, dict)
+            or not isinstance(day_plan.get("places"), list)
+            or not all(isinstance(place, dict) for place in day_plan["places"])
+        ):
+            return False
+        meals = day_plan.get("meals", [])
+        if not isinstance(meals, list) or not all(
+            isinstance(meal, dict) for meal in meals
+        ):
+            return False
+    return True
+
+
+def _reconcile_saved_itinerary(trip):
+    work = TripWork.query.filter_by(
+        trip_id=trip.id,
+        workflow="itinerary",
+    ).first()
+    if work is not None:
+        return work.state == "SUCCEEDED"
+
+    if trip.itinerary_status in {"PROCESSING", "FAILURE"}:
+        return False
+
+    itinerary = Itinerary.query.filter_by(trip_id=trip.id).first()
+    if itinerary is None or not _valid_saved_itinerary(
+        itinerary.daily_plan,
+        allow_empty=trip.itinerary_status == "SUCCESS",
+    ):
+        return False
+
+    now = utc_now()
+    work = TripWork(
+        trip_id=trip.id,
+        workflow="itinerary",
+        state="SUCCEEDED",
+        generation=1,
+        attempt_count=0,
+        dispatch_attempt_count=0,
+        completed_at=now,
+        result=itinerary.daily_plan,
+    )
+    db.session.add(work)
+    trip.itinerary_status = "SUCCESS"
+    trip.itinerary_error = None
+    try:
+        db.session.commit()
+        return True
+    except IntegrityError:
+        db.session.rollback()
+        existing = TripWork.query.filter_by(
+            trip_id=trip.id,
+            workflow="itinerary",
+        ).first()
+        return existing is not None and existing.state == "SUCCEEDED"
+
+
+def _trip_task_status(trip):
+    clustering, clustering_result = _task_snapshot(trip, "clustering")
+    budget, budget_result = _task_snapshot(trip, "budget")
+    if not trip.budget_task_id and trip.budget_type is None:
+        budget = {"task_id": None, "status": "SKIPPED", "error": None}
+
+    failed = any(
+        item["status"] in {"FAILURE", "RESULT_UNAVAILABLE"}
+        for item in (clustering, budget)
+    )
+    pending = any(
+        item["status"] in {"PENDING", "STARTED", "RETRY"}
+        for item in (clustering, budget)
+    )
+    not_started = any(
+        item["status"] == "NOT_STARTED"
+        for item in (clustering, budget)
+    )
+    overall_status = (
+        "failed"
+        if failed
+        else "processing"
+        if pending
+        else "not_started"
+        if not_started
+        else "ready"
+    )
+
+    return {
+        "status": overall_status,
+        "tasks": {"clustering": clustering, "budget": budget},
+    }, clustering_result, budget_result
+
+
+def _mark_trip_task_failed(trip, task_name, message):
+    setattr(trip, f"{task_name}_status", "FAILURE")
+    setattr(trip, f"{task_name}_error", message)
+    db.session.commit()
+
+
+def _queue_trip_task(trip, task_name, task_id, generation=1):
+    if task_name == "clustering":
+        task = perform_clustering
+        args = (
+            trip.destination_city,
+            (trip.end_date - trip.start_date).days + 1,
+            json.loads(trip.mandatory_places or "[]"),
+            json.loads(trip.preferences or "[]"),
+            json.loads(trip.dislikes or "[]"),
+        )
+    else:
+        task = get_travel_cost
+        args = (trip.destination_city, trip.budget_type)
+    app.logger.info(
+        "Publishing Celery task %s for trip %s "
+        "(workflow=%s, task_id=%s, generation=%s, queue=celery)",
+        task.name,
+        trip.id,
+        task_name,
+        task_id,
+        generation,
+    )
+    published = task.apply_async(
+        args=args,
+        kwargs={
+            "trip_id": trip.id,
+            "generation": generation,
+            "work_task_id": task_id,
+        },
+        task_id=task_id,
+    )
+    app.logger.info(
+        "Celery publication returned task_id=%s for trip %s "
+        "(workflow=%s, requested_task_id=%s)",
+        published.id,
+        trip.id,
+        task_name,
+        task_id,
+    )
+
+
+def _trip_status_payload(trip):
+    task_status, _, _ = _trip_task_status(trip)
+    return {
+        "trip_id": trip.id,
+        **task_status,
+        "itinerary": {
+            "status": trip.itinerary_status or "NOT_STARTED",
+            "error": sanitize_error_message(trip.itinerary_error or "") or None,
+        },
+    }
+
+
+def _get_owned_trip(trip_id):
+    if isinstance(trip_id, bool):
+        return None
+    if isinstance(trip_id, int):
+        normalized_trip_id = trip_id
+    elif isinstance(trip_id, str) and trip_id.isdecimal():
+        normalized_trip_id = int(trip_id)
+    else:
+        return None
+    if normalized_trip_id <= 0:
+        return None
+    return Trip.query.filter_by(
+        id=normalized_trip_id,
+        user_id=current_user.id,
+    ).first()
 
 
 class Itinerary(db.Model):
@@ -246,6 +673,19 @@ def hello():
     return jsonify({"message": "Flask server is running!"})
 
 
+@app.route("/me", methods=["GET"])
+def get_current_session():
+    if not current_user.is_authenticated:
+        return jsonify({"user": None}), 200
+    return jsonify({
+        "user": {
+            "id": current_user.id,
+            "name": current_user.name,
+            "email": current_user.email,
+        }
+    }), 200
+
+
 @app.route("/signup", methods=["POST"])
 # CHANGED: Removed @csrf.exempt (CSRF protection was removed)
 def signup():
@@ -271,7 +711,14 @@ def signup():
         db.session.commit()
         login_user(new_user)
 
-        return jsonify({"message": f"User {new_user.name} created successfully!"}), 201
+        return jsonify({
+            "message": f"User {new_user.name} created successfully!",
+            "user": {
+                "id": new_user.id,
+                "name": new_user.name,
+                "email": new_user.email,
+            },
+        }), 201
 
     except ValidationError as e:
         # CHANGED: Handle Pydantic validation errors
@@ -351,21 +798,19 @@ def list_trips():
 @app.route("/delete_trip", methods=["POST"])
 @login_required
 def delete_trip_json():
-    data = request.get_json()
-    if not data or 'trip_id' not in data:
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or not data.get("trip_id"):
         return jsonify({"error": "Missing 'trip_id' in JSON body"}), 400
 
-    try:
-        trip_id = data['trip_id']
-    except ValueError:
-        return jsonify({"error": "Invalid trip ID format. Must be an integer."}), 400
-    trip = Trip.query.filter_by(id=trip_id).first()
-    print(trip)
-    # 3. Handle case where the trip is not found or unauthorized
+    trip_id = data["trip_id"]
+    trip = _get_owned_trip(trip_id)
     if trip is None:
-        return jsonify({"error": "Trip not found or unauthorized"}), 404
+        return jsonify({"error": "Trip not found"}), 404
 
     try:
+        TripWork.query.filter_by(trip_id=trip.id).delete(
+            synchronize_session=False
+        )
         # 4. Delete the trip
         db.session.delete(trip)
         
@@ -378,7 +823,7 @@ def delete_trip_json():
     except Exception as e:
         # 7. Handle potential database errors
         db.session.rollback()
-        print(f"Database error during trip deletion (POST): {e}")
+        app.logger.error("Database error during trip deletion: %s", e)
         return jsonify({"error": "An internal error occurred during deletion"}), 500
     
 
@@ -417,28 +862,170 @@ def create_trip():
             food_preference=model.food_preference,  # ← ADD THIS
             pace=model.pace
         )
-        if model.budget_type is not None:
-            task1 = get_travel_cost.delay(model.destination_city, model.budget_type)
-            t["get_travel_cost"]=task1.id
-        d=model.end_date-model.start_date
-        task2 = perform_clustering.delay(
-        model.destination_city,
-        int(d.days+1),
-        model.mandatory_places,
-        model.preferences,
-        model.dislikes
-    )
-        t["perform_clustering"]=task2.id
-        # 3. Add to the database
+
         db.session.add(new_trip)
+        db.session.flush()
+
+        new_trip.clustering_task_id = uuid4().hex
+        new_trip.clustering_status = "PENDING"
+        enqueue_work(
+            new_trip.id,
+            "clustering",
+            new_trip.clustering_task_id,
+        )
+        db.session.add(
+            TripWork(
+                trip_id=new_trip.id,
+                workflow="itinerary",
+                state="NOT_STARTED",
+                generation=0,
+                attempt_count=0,
+                dispatch_attempt_count=0,
+            )
+        )
+        if model.budget_type is not None:
+            new_trip.budget_task_id = uuid4().hex
+            new_trip.budget_status = "PENDING"
+            enqueue_work(
+                new_trip.id,
+                "budget",
+                new_trip.budget_task_id,
+            )
+        else:
+            new_trip.budget_status = "SKIPPED"
         db.session.commit()
 
-        # 4. Send a success response
-        return jsonify({"message": "Trip created successfully!", "trip_id": new_trip.id,"tasks":t}), 201
+        task_status = {
+            "clustering": {
+                "task_id": new_trip.clustering_task_id,
+                "status": new_trip.clustering_status,
+                "error": new_trip.clustering_error,
+            },
+            "budget": {
+                "task_id": new_trip.budget_task_id,
+                "status": new_trip.budget_status,
+                "error": new_trip.budget_error,
+            },
+        }
+        return jsonify({
+            "message": "Trip created successfully!",
+            "trip_id": new_trip.id,
+            "tasks": task_status,
+        }), 201
 
     except ValidationError as e:
         # If validation fails, send back the formatted errors
         return jsonify({"errors": format_pydantic_errors(e)}), 400
+
+
+@app.route("/trip/<int:trip_id>/status", methods=["GET"])
+@login_required
+def get_trip_status(trip_id):
+    trip = Trip.query.filter_by(
+        id=trip_id,
+        user_id=current_user.id,
+    ).first()
+    if trip is None:
+        return jsonify({"error": "Trip not found"}), 404
+
+    return jsonify(_trip_status_payload(trip)), 200
+
+
+@app.route(
+    "/trip/<int:trip_id>/tasks/<task_name>/retry",
+    methods=["POST"],
+)
+@login_required
+def retry_trip_task(trip_id, task_name):
+    if task_name not in {"clustering", "budget"}:
+        return jsonify({"error": "Unknown trip task"}), 400
+
+    trip = Trip.query.filter_by(
+        id=trip_id,
+        user_id=current_user.id,
+    ).first()
+    if trip is None:
+        return jsonify({"error": "Trip not found"}), 404
+    if task_name == "budget" and trip.budget_type is None:
+        return jsonify({"error": "This trip has no budget-estimation task"}), 400
+
+    task_info, _ = _task_snapshot(trip, task_name)
+    if task_info["status"] in {"PENDING", "STARTED", "RETRY"}:
+        return jsonify({
+            "status": "processing",
+            "message": "This trip task is already queued or running.",
+            "task": task_info,
+        }), 202
+    if task_info["status"] == "SUCCESS":
+        return jsonify({
+            "error": "A successful task cannot be retried.",
+            "task": task_info,
+        }), 409
+
+    id_field = f"{task_name}_task_id"
+    status_field = f"{task_name}_status"
+    error_field = f"{task_name}_error"
+    work = TripWork.query.filter_by(
+        trip_id=trip_id,
+        workflow=task_name,
+    ).first()
+    task_id = uuid4().hex
+    if work is None:
+        work = enqueue_work(trip_id, task_name, task_id, generation=1)
+        generation = 1
+    else:
+        previous_generation = work.generation
+        generation = previous_generation + 1
+        retryable_states = ("FAILED", "RESULT_UNAVAILABLE")
+        updated = (
+            TripWork.query.filter_by(
+                id=work.id,
+                generation=previous_generation,
+            )
+            .filter(TripWork.state.in_(retryable_states))
+            .update(
+                {
+                    "state": "QUEUED",
+                    "generation": generation,
+                    "celery_task_id": task_id,
+                    "attempt_count": 0,
+                    "dispatch_attempt_count": 0,
+                    "enqueued_at": utc_now(),
+                    "dispatched_at": None,
+                    "dispatch_lease_until": None,
+                    "started_at": None,
+                    "heartbeat_at": None,
+                    "lease_expires_at": None,
+                    "completed_at": None,
+                    "next_attempt_at": utc_now(),
+                    "result": None,
+                    "error_code": None,
+                    "error_message": None,
+                },
+                synchronize_session=False,
+            )
+        )
+        if updated != 1:
+            db.session.rollback()
+            return jsonify({
+                "status": "processing",
+                "message": "This trip task changed state; refresh its status.",
+            }), 202
+    setattr(trip, id_field, task_id)
+    setattr(trip, status_field, "PENDING")
+    setattr(trip, error_field, None)
+    trip.itinerary_status = "NOT_STARTED"
+    trip.itinerary_error = None
+    db.session.commit()
+
+    return jsonify({
+        "status": "processing",
+        "task": {
+            "task_id": task_id,
+            "status": "PENDING",
+            "error": None,
+        },
+    }), 202
 
 
 @app.route("/update_transport", methods=["POST"])
@@ -448,27 +1035,26 @@ def update_transport():
     Updates any/all optional details for an existing trip.
     This version manually checks for each expected key.
     """
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
 
     try:
+        if not isinstance(data, dict) or not data.get("trip_id"):
+            return jsonify({
+                "errors": {"trip": "trip_id is missing from request."}
+            }), 400
+
         # 1. Validate the incoming data using the Pydantic model
         model = TransModel.model_validate(data)
         # 1. Get the trip_id from the raw JSON data
         trip_id = data.get('trip_id')
-        if not trip_id:
-            return jsonify({"errors": {"trip": "trip_id is missing from request."}}), 400
 
         # 2. Find the trip in the database
-        trip = db.session.get(Trip, trip_id)
+        trip = _get_owned_trip(trip_id)
 
         # 3. Security Checks
         if not trip:
             return jsonify({"errors": {"trip": "Trip not found."}}), 404
         
-        # ---
-        # CRITICAL: You must keep this security check.
-        # It ensures a user can only edit their *own* trips.
-        # ---
         if 'needs_transport' in data:
             trip.needs_transport = data['needs_transport']
         if 'transport_type' in data:
@@ -491,9 +1077,11 @@ def update_transport():
 @login_required
 def transport_option():
     try:
-        data = request.get_json()
+        data = request.get_json(silent=True) or {}
+        if not isinstance(data, dict) or not data.get("trip_id"):
+            return jsonify({"error": "trip_id is required"}), 400
         trip_id = data.get('trip_id')
-        trip = db.session.get(Trip, trip_id)
+        trip = _get_owned_trip(trip_id)
 
         if not trip:
             return jsonify({"error": "Trip not found"}), 404
@@ -628,9 +1216,13 @@ def update_accomodation():
     - User needs accommodation
     - User does NOT need accommodation (skip hotel)
     """
-    data = request.get_json()
+    data = request.get_json(silent=True) or {}
 
     try:
+        if not isinstance(data, dict) or not data.get("trip_id"):
+            return jsonify({
+                "errors": {"trip": "trip_id is missing from request."}
+            }), 400
         # Validate payload structure (does NOT mutate DB)
         model = AccModel.model_validate(data)
 
@@ -638,12 +1230,7 @@ def update_accomodation():
         # 1. Extract & validate trip_id
         # -------------------------------
         trip_id = data.get("trip_id")
-        if not trip_id:
-            return jsonify({
-                "errors": {"trip": "trip_id is missing from request."}
-            }), 400
-
-        trip = db.session.get(Trip, trip_id)
+        trip = _get_owned_trip(trip_id)
         if not trip:
             return jsonify({
                 "errors": {"trip": "Trip not found."}
@@ -736,13 +1323,15 @@ def update_accomodation():
 @app.route("/up_transport_choice",methods=["POST"])
 @login_required
 def up_transport_choice():
-    data = request.get_json()
-    trip_id = data.get('trip_id')
-    if not trip_id:
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or not data.get("trip_id"):
         return jsonify({"errors": {"trip": "trip_id is missing from request."}}), 400
+    trip_id = data.get('trip_id')
 
     # 2. Find the trip in the database
-    trip = db.session.get(Trip, trip_id)
+    trip = _get_owned_trip(trip_id)
+    if trip is None:
+        return jsonify({"errors": {"trip": "Trip not found."}}), 404
     trip.up_mode=data['up_mode']
     trip.up_mode_id=data['up_mode_id']
     db.session.commit()
@@ -752,13 +1341,15 @@ def up_transport_choice():
 @app.route("/down_transport_choice",methods=["POST"])
 @login_required
 def down_transport_choice():
-    data = request.get_json()
-    trip_id = data.get('trip_id')
-    if not trip_id:
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or not data.get("trip_id"):
         return jsonify({"errors": {"trip": "trip_id is missing from request."}}), 400
+    trip_id = data.get('trip_id')
 
     # 2. Find the trip in the database
-    trip = db.session.get(Trip, trip_id)
+    trip = _get_owned_trip(trip_id)
+    if trip is None:
+        return jsonify({"errors": {"trip": "Trip not found."}}), 404
     trip.down_mode=data['down_mode']
     trip.down_mode_id=data['down_mode_id']
     db.session.commit()
@@ -804,19 +1395,72 @@ def get_price_limit_hotels(hotel_results: List[Dict[str, Any]], budget_type: str
 
 
 @app.route("/hotel_option", methods=["POST"])
-# @login_required # Uncomment if you use this decorator
+@login_required
 def hotel_option():
     try:
-        data = request.get_json()
-        
-        trip_id = data.get('trip_id')
-        trip = db.session.get(Trip, trip_id)
-        task_result = AsyncResult(t["perform_clustering"], app=tasks.celery)
-        
-        # city = trip.origin_city
-        # --- 1. Extract Input ---......HERE CELERY TASK RESULT I SDH GET
-        global t_r
-        t_r=task_result.result
+        data = request.get_json(silent=True) or {}
+        trip_id = data.get("trip_id")
+        if not trip_id:
+            return jsonify({"error": "trip_id is required"}), 400
+
+        trip = Trip.query.filter_by(
+            id=trip_id,
+            user_id=current_user.id,
+        ).first()
+        if trip is None:
+            return jsonify({"error": "Trip not found"}), 404
+
+        task_status, clustering_result, _ = _trip_task_status(trip)
+        clustering_status = task_status["tasks"]["clustering"]
+        if clustering_status["status"] in {"PENDING", "STARTED", "RETRY"}:
+            return jsonify({
+                "status": "processing",
+                "message": "Place search and clustering are still running.",
+                "tasks": task_status["tasks"],
+                "retry_after_seconds": 3,
+            }), 202
+        if clustering_status["status"] in {"FAILURE", "RESULT_UNAVAILABLE"}:
+            message = (
+                clustering_status["error"]
+                if clustering_status["status"] == "RESULT_UNAVAILABLE"
+                else "Place search or clustering failed."
+            )
+            return jsonify({
+                "status": "failed",
+                "error": message,
+                "task": clustering_status,
+                "tasks": task_status["tasks"],
+            }), 500
+        if clustering_status["status"] != "SUCCESS":
+            return jsonify({
+                "status": "not_started",
+                "error": "Clustering has not been queued for this trip.",
+                "tasks": task_status["tasks"],
+            }), 409
+        if not isinstance(clustering_result, dict):
+            _mark_trip_task_failed(
+                trip,
+                "clustering",
+                "Clustering result is unavailable.",
+            )
+            return jsonify({
+                "status": "failed",
+                "error": "Clustering result is unavailable.",
+                "tasks": task_status["tasks"],
+            }), 500
+        missing_clustering_keys = {"Places", "clustering", "centroid"} - clustering_result.keys()
+        if missing_clustering_keys:
+            message = (
+                "Clustering result is incomplete: "
+                + ", ".join(sorted(missing_clustering_keys))
+            )
+            _mark_trip_task_failed(trip, "clustering", message)
+            return jsonify({
+                "status": "failed",
+                "error": message,
+                "tasks": task_status["tasks"],
+            }), 500
+
         CITY_CENTERS = {
             "mumbai": {"lat": 19.0760, "lon": 72.8777},
             "bengaluru": {"lat": 12.9716, "lon": 77.5946},
@@ -824,7 +1468,7 @@ def hotel_option():
         }
 
         # Normalize the city name to handle case sensitivity/spaces
-        origin_city_key = trip.destination_city.strip().lower() if trip.origin_city else ""
+        origin_city_key = trip.destination_city.strip().lower()
 
         # --- 2. Determine Lat/Lon ---
         if origin_city_key in CITY_CENTERS:
@@ -833,14 +1477,39 @@ def hotel_option():
             lon = CITY_CENTERS[origin_city_key]["lon"]
         else:
             # Fallback to the original centroid logic for other cities
-            lat = t_r["centroid"]["avg_lat"]
-            lon = t_r["centroid"]["avg_long"]
+            centroid = clustering_result.get("centroid", {})
+            lat = centroid.get("avg_lat")
+            lon = centroid.get("avg_long")
+
+        try:
+            lat = float(lat)
+            lon = float(lon)
+        except (TypeError, ValueError):
+            return jsonify({
+                "error": "No valid destination coordinates are available.",
+                "tasks": task_status["tasks"],
+            }), 500
+        if (
+            not np.isfinite(lat)
+            or not np.isfinite(lon)
+            or not -90 <= lat <= 90
+            or not -180 <= lon <= 180
+            or (lat == 0 and lon == 0)
+        ):
+            return jsonify({
+                "error": "No valid destination coordinates are available.",
+                "tasks": task_status["tasks"],
+            }), 500
+
         check_in = trip.start_date.strftime('%Y-%m-%d')
         check_out = trip.end_date.strftime('%Y-%m-%d')
         bud_type = trip.accommodation_type
         
-        if not all([lat, lon, check_in, check_out, bud_type]):
-            return jsonify({"error": "Missing required parameters.","t":t_r}), 400
+        if not all([check_in, check_out, bud_type]):
+            return jsonify({
+                "error": "Missing required accommodation parameters.",
+                "tasks": task_status["tasks"],
+            }), 400
 
         # --- 2. Fetch All Hotels ---
         all_hotels = hotels.get_hotels_near(
@@ -850,7 +1519,6 @@ def hotel_option():
             check_out=check_out,
             limit=50 
         )
-        print(all_hotels)
         if not all_hotels:
             return jsonify([]), 200 # Return empty list if no hotels found
 
@@ -899,22 +1567,38 @@ def hotel_option():
         # --- 5. Return Final List as JSON ---
         
         # This returns the list of hotel dictionaries directly, as requested.
-        return jsonify({"hotels":final_hotels_filtered,"tasks":t_r}), 200
+        return jsonify({
+            "hotels": final_hotels_filtered,
+            "tasks": clustering_result,
+            "task_status": task_status["tasks"],
+        }), 200
 
     except requests.exceptions.RequestException as e:
-        print(f"External API error: {e}")
+        app.logger.error(
+            "External hotel API error for trip %s: %s\n%s",
+            trip_id,
+            sanitize_error_message(e),
+            sanitize_error_message(traceback.format_exc()),
+        )
         return jsonify({"error": "External data service unavailable."}), 503 
 
     except Exception as e:
-        print(f"Internal error in hotel_option: {e}")
-        return jsonify({"error": f"Internal error in hotel_option: {e} ","tasks_id":t,"tasks":t_r}), 500
+        safe_error = sanitize_error_message(e)
+        app.logger.error(
+            "Internal error in hotel_option: %s\n%s",
+            safe_error,
+            sanitize_error_message(traceback.format_exc()),
+        )
+        return jsonify({"error": "Internal error in hotel_option."}), 500
 
 
 @app.route("/itinerary/<int:trip_id>", methods=["GET"])
 @login_required
 def get_itinerary(trip_id):
-    # Verify that the trip exists
-    trip = db.session.get(Trip, trip_id)
+    trip = Trip.query.filter_by(
+        id=trip_id,
+        user_id=current_user.id,
+    ).first()
 
     if trip is None:
         return jsonify({
@@ -923,19 +1607,88 @@ def get_itinerary(trip_id):
             "reason": "trip_not_found"
         }), 404
 
+    fail_expired_solver_if_exhausted(trip_id)
+    db.session.refresh(trip)
+    _reconcile_saved_itinerary(trip)
     itinerary = Itinerary.query.filter_by(
         trip_id=trip_id
     ).first()
 
-    # The trip exists, but the itinerary has not been saved yet
-    if itinerary is None or not itinerary.daily_plan:
+    status_payload = _trip_status_payload(trip)
+    if trip.itinerary_status == "FAILURE":
+        itinerary_work = TripWork.query.filter_by(
+            trip_id=trip_id,
+            workflow="itinerary",
+        ).first()
+        attempts_exhausted = (
+            itinerary_work is not None
+            and itinerary_work.state == "FAILED"
+            and itinerary_work.attempt_count >= MAX_WORK_ATTEMPTS
+        )
+        return jsonify({
+            "exists": False,
+            "status": "failed",
+            "reason": (
+                "solver_attempts_exhausted"
+                if attempts_exhausted
+                else "itinerary_generation_failed"
+            ),
+            "error": sanitize_error_message(
+                (
+                    itinerary_work.error_message
+                    if attempts_exhausted
+                    else trip.itinerary_error
+                )
+                or "Itinerary generation failed."
+            ),
+            "tasks": status_payload["tasks"],
+        }), 500
+
+    if trip.itinerary_status == "PROCESSING":
         return jsonify({
             "exists": False,
             "status": "processing",
-            "reason": "itinerary_not_ready"
+            "reason": "itinerary_generation_in_progress",
+            "tasks": status_payload["tasks"],
+            "retry_after_seconds": 3,
+        }), 202
+
+    # The trip exists, but the itinerary has not been saved yet
+    if itinerary is None or (
+        not itinerary.daily_plan and trip.itinerary_status != "SUCCESS"
+    ):
+        if status_payload["status"] == "failed":
+            return jsonify({
+                "exists": False,
+                "status": "failed",
+                "reason": "trip_task_failed",
+                "tasks": status_payload["tasks"],
+            }), 500
+        return jsonify({
+            "exists": False,
+            "status": "processing",
+            "reason": "itinerary_not_ready",
+            "tasks": status_payload["tasks"],
+            "retry_after_seconds": 3,
+        }), 202
+
+    if trip.itinerary_status == "NOT_STARTED":
+        return jsonify({
+            "exists": False,
+            "status": "processing",
+            "reason": "itinerary_not_ready",
+            "tasks": status_payload["tasks"],
+            "retry_after_seconds": 3,
         }), 202
 
     daily_plan = itinerary.daily_plan
+    if not isinstance(daily_plan, dict):
+        return jsonify({
+            "exists": False,
+            "status": "failed",
+            "reason": "invalid_saved_itinerary",
+            "error": "The saved itinerary is invalid.",
+        }), 500
 
     has_any_places = any(
         day.get("places")
@@ -943,7 +1696,7 @@ def get_itinerary(trip_id):
         if isinstance(day, dict)
     )
 
-    if not has_any_places:
+    if not has_any_places and trip.itinerary_status != "SUCCESS":
         return jsonify({
             "exists": False,
             "status": "processing",
@@ -962,13 +1715,15 @@ def get_itinerary(trip_id):
 @app.route("/hotel_choice",methods=["POST"])
 @login_required
 def hotel_choice():
-    data = request.get_json()
-    trip_id = data.get('trip_id')
-    if not trip_id:
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict) or not data.get("trip_id"):
         return jsonify({"errors": {"trip": "trip_id is missing from request."}}), 400
+    trip_id = data.get('trip_id')
 
     # 2. Find the trip in the database
-    trip = db.session.get(Trip, trip_id)
+    trip = _get_owned_trip(trip_id)
+    if trip is None:
+        return jsonify({"errors": {"trip": "Trip not found."}}), 404
     trip.hotel_name=data['hotel_name']
     trip.hotel_address=data['hotel_address']
     trip.hotel_lat=data['hotel_lat']
@@ -1034,42 +1789,61 @@ def update_cluster_stats(cluster_id, cluster_data, all_places_dict):
     # Note: We are not recalculating 'nearest_clusters' here to save time, 
     # as centroid shift is usually negligible for one place.
 
-def wait_for_gemini_budget(task_id, timeout=90, poll_interval=3):
-    """
-    Waits for Gemini budget up to `timeout` seconds.
-    Returns:
-      - float budget if success
-      - None if timeout or failure
-    """
-    task = AsyncResult(task_id, app=tasks.celery)
-    waited = 0
-
-    while waited < timeout:
-        if task.ready():
-            if task.failed():
-                return None
-            return task.result.get("final_cost")
-
-        time.sleep(poll_interval)
-        waited += poll_interval
-
-    return None
-
-
 @app.route("/ilp_solver", methods=["POST", "OPTIONS"])
 def ilp_solver():
     if request.method == "OPTIONS":
         return "", 204
 
-    # Keep the rest of your existing ilp_solver() code below.
-    # Keep your existing solver function body here
-    print("started")
+    if not current_user.is_authenticated:
+        return jsonify({"error": "Authentication required"}), 401
 
-    data = request.get_json() or {}
+    data = request.get_json(silent=True) or {}
     trip_id = data.get("trip_id")
 
     if trip_id is None:
         return jsonify({"error": "trip_id is required"}), 400
+
+    trip = Trip.query.filter_by(
+        id=trip_id,
+        user_id=current_user.id,
+    ).first()
+    if trip is None:
+        return jsonify({"error": "Trip not found"}), 404
+    fail_expired_solver_if_exhausted(trip_id)
+    db.session.refresh(trip)
+    _reconcile_saved_itinerary(trip)
+    solver_work = TripWork.query.filter_by(
+        trip_id=trip_id,
+        workflow="itinerary",
+    ).first()
+    if (
+        solver_work is not None
+        and solver_work.state == "FAILED"
+        and solver_work.attempt_count >= MAX_WORK_ATTEMPTS
+    ):
+        return jsonify({
+            "status": "failed",
+            "reason": "solver_attempts_exhausted",
+            "error": sanitize_error_message(
+                solver_work.error_message or SOLVER_ATTEMPTS_EXHAUSTED_MESSAGE
+            ),
+        }), 500
+
+    saved_work = TripWork.query.filter_by(
+        trip_id=trip_id,
+        workflow="itinerary",
+        state="SUCCEEDED",
+    ).first()
+    if saved_work is not None:
+        saved_itinerary = Itinerary.query.filter_by(trip_id=trip_id).first()
+        if saved_itinerary is None or not isinstance(
+            saved_itinerary.daily_plan, dict
+        ):
+            return jsonify({
+                "status": "failed",
+                "error": "Completed itinerary result is unavailable.",
+            }), 500
+        return jsonify(saved_itinerary.daily_plan), 200
 
     with ilp_locks_guard:
         trip_lock = ilp_locks.setdefault(str(trip_id), Lock())
@@ -1077,15 +1851,14 @@ def ilp_solver():
     if not trip_lock.acquire(blocking=False):
         return jsonify({
             "status": "processing",
-            "message": "Itinerary generation is already running for this trip."
+            "message": "Itinerary generation is already running for this trip.",
+            "retry_after_seconds": 3,
         }), 202
 
+    solver_generation = None
+    solver_task_id = uuid4().hex
+    solver_heartbeat = None
     try:
-        # Keep the rest of your existing function logic here.
-        # Start with:
-        trip = db.session.get(Trip, trip_id)
-
-        # Keep the remaining existing code inside this try block.
         trip_start = trip.start_date
         trip_end = trip.end_date
 
@@ -1098,44 +1871,48 @@ def ilp_solver():
         if not isinstance(trip_start, date) or not isinstance(trip_end, date):
             return jsonify({"error": "Invalid trip dates"}), 400
 
-        # Verify clustering task exists
-        if "perform_clustering" not in t:
-            return jsonify({
-                "error": "Clustering task not started yet"
-            }), 400
-
-        clustering_task = AsyncResult(
-            t["perform_clustering"],
-            app=tasks.celery
-        )
-
-        if not clustering_task.ready():
+        task_status, clustering_data, budget_data = _trip_task_status(trip)
+        clustering_status = task_status["tasks"]["clustering"]
+        if clustering_status["status"] in {"PENDING", "STARTED", "RETRY"}:
             return jsonify({
                 "status": "processing",
-                "message": "Clustering still running"
+                "message": "Clustering is still running.",
+                "tasks": task_status["tasks"],
+                "retry_after_seconds": 3,
             }), 202
 
-        if clustering_task.failed():
+        if clustering_status["status"] in {"FAILURE", "RESULT_UNAVAILABLE"}:
             return jsonify({
-                "error": "Clustering task failed",
-                "details": str(clustering_task.result)
+                "status": "failed",
+                "error": (
+                    clustering_status["error"]
+                    if clustering_status["status"] == "RESULT_UNAVAILABLE"
+                    else "Clustering task failed"
+                ),
+                "details": clustering_status["error"],
+                "tasks": task_status["tasks"],
             }), 500
 
-        t_r = clustering_task.result
+        if clustering_status["status"] != "SUCCESS":
+            return jsonify({
+                "status": "not_started",
+                "error": "Clustering has not been queued for this trip.",
+                "tasks": task_status["tasks"],
+            }), 409
 
-        if not isinstance(t_r, dict):
+        if not isinstance(clustering_data, dict):
             return jsonify({
                 "error": "Invalid clustering result"
             }), 500
 
         required_keys = {"Places", "clustering", "centroid"}
-        missing = required_keys - t_r.keys()
+        missing = required_keys - clustering_data.keys()
 
         if missing:
             return jsonify({
                 "error": "Incomplete clustering data",
                 "missing_keys": list(missing),
-                "available_keys": list(t_r.keys())
+                "available_keys": list(clustering_data.keys())
             }), 500
 
         # Determine the daily budget
@@ -1145,19 +1922,42 @@ def ilp_solver():
         thre_time = dt_time(14, 30, 0)
 
         if trip.budget_type is not None:
-            if "get_travel_cost" not in t:
-                return jsonify({
-                    "error": "Budget estimation task not started"
-                }), 400
-
-            daily_price = wait_for_gemini_budget(t["get_travel_cost"])
-
-            if daily_price is None:
+            budget_status = task_status["tasks"]["budget"]
+            if budget_status["status"] in {"PENDING", "STARTED", "RETRY"}:
                 return jsonify({
                     "status": "processing",
                     "message": "Waiting for budget estimation",
-                    "retry_after_seconds": 5
+                    "tasks": task_status["tasks"],
+                    "retry_after_seconds": 3,
                 }), 202
+            if budget_status["status"] in {"FAILURE", "RESULT_UNAVAILABLE"}:
+                return jsonify({
+                    "status": "failed",
+                    "error": (
+                        budget_status["error"]
+                        if budget_status["status"] == "RESULT_UNAVAILABLE"
+                        else "Budget estimation task failed."
+                    ),
+                    "details": budget_status["error"],
+                    "tasks": task_status["tasks"],
+                }), 500
+            if budget_status["status"] != "SUCCESS":
+                return jsonify({
+                    "status": "not_started",
+                    "error": "Budget estimation has not been queued for this trip.",
+                    "tasks": task_status["tasks"],
+                }), 409
+            if (
+                not isinstance(budget_data, dict)
+                or budget_data.get("final_cost") is None
+            ):
+                return jsonify({
+                    "status": "failed",
+                    "error": "Budget estimation result is unavailable.",
+                    "tasks": task_status["tasks"],
+                }), 500
+
+            daily_price = budget_data["final_cost"]
         else:
             if trip.needs_transport:
                 if trip.up_mode.lower() == "flight":
@@ -1333,28 +2133,49 @@ def ilp_solver():
                 "error": "No available sightseeing time for this trip"
             }), 400
 
+        claim_state, solver_generation = claim_solver(
+            trip_id,
+            solver_task_id,
+        )
+        if claim_state == "FAILED":
+            return jsonify({
+                "status": "failed",
+                "reason": "solver_attempts_exhausted",
+                "error": SOLVER_ATTEMPTS_EXHAUSTED_MESSAGE,
+            }), 500
+        if claim_state == "SUCCEEDED":
+            saved_itinerary = Itinerary.query.filter_by(trip_id=trip_id).first()
+            if saved_itinerary is not None and isinstance(
+                saved_itinerary.daily_plan, dict
+            ):
+                return jsonify(saved_itinerary.daily_plan), 200
+            return jsonify({
+                "status": "failed",
+                "error": "Completed itinerary result is unavailable.",
+            }), 500
+        if claim_state != "CLAIMED":
+            return jsonify({
+                "status": "processing",
+                "message": "Itinerary generation is already running for this trip.",
+                "retry_after_seconds": 3,
+            }), 202
+        solver_heartbeat = start_heartbeat(
+            trip_id,
+            "itinerary",
+            solver_generation,
+            solver_task_id,
+        )
+        trip = db.session.get(Trip, trip_id)
+
         # Prepare clustering data
         current_date = start
         final_itinerary = {}
 
         all_places_dict = {
-            place["id"]: place for place in t_r["Places"]
+            place["id"]: place for place in clustering_data["Places"]
         }
 
-        available_cluster_ids = list(t_r["clustering"].keys())
-
-        # FIX: retrieve the existing itinerary before creating one
-        existing_itinerary = Itinerary.query.filter_by(
-            trip_id=trip_id
-        ).first()
-
-        if existing_itinerary is None:
-            existing_itinerary = Itinerary(
-                trip_id=trip_id,
-                daily_plan={}
-            )
-            db.session.add(existing_itinerary)
-            db.session.flush()
+        available_cluster_ids = list(clustering_data["clustering"].keys())
 
         day_index = 0
 
@@ -1389,10 +2210,10 @@ def ilp_solver():
             # Select the best remaining cluster
             best_cluster_id = max(
                 available_cluster_ids,
-                key=lambda cid: t_r["clustering"][cid]["stats"]["avg_score"]
+                key=lambda cid: clustering_data["clustering"][cid]["stats"]["avg_score"]
             )
 
-            cluster_place_ids = t_r["clustering"][best_cluster_id]["place_ids"]
+            cluster_place_ids = clustering_data["clustering"][best_cluster_id]["place_ids"]
             day_places_data = [
                 all_places_dict[pid]
                 for pid in cluster_place_ids
@@ -1456,7 +2277,7 @@ def ilp_solver():
                     min_dist = float("inf")
 
                     for target_id in remaining_clusters:
-                        centroid = t_r["centroid"]["values"].get(
+                        centroid = clustering_data["centroid"]["values"].get(
                             str(target_id)
                         )
 
@@ -1475,10 +2296,10 @@ def ilp_solver():
                             best_target_id = target_id
 
                     if best_target_id is not None:
-                        t_r["clustering"][best_target_id]["place_ids"].append(uid)
+                        clustering_data["clustering"][best_target_id]["place_ids"].append(uid)
                         update_cluster_stats(
                             best_target_id,
-                            t_r["clustering"],
+                            clustering_data["clustering"],
                             all_places_dict
                         )
                         place_obj["cluster_label"] = int(best_target_id)
@@ -1486,22 +2307,48 @@ def ilp_solver():
             # Remove the processed cluster
             available_cluster_ids.remove(best_cluster_id)
 
-            # Persist progress in the same itinerary row
-            existing_itinerary.daily_plan = final_itinerary
-            db.session.commit()
-
             current_date += timedelta(days=1)
             day_index += 1
 
+        solver_heartbeat.assert_owned()
+        if not finish_solver(
+            trip_id,
+            solver_generation,
+            solver_task_id,
+            final_itinerary,
+        ):
+            return jsonify({
+                "status": "processing",
+                "message": "Itinerary claim changed; refresh status.",
+                "retry_after_seconds": 3,
+            }), 202
         return jsonify(final_itinerary), 200
 
     except Exception as e:
         db.session.rollback()
-        app.logger.exception("Error in ilp_solver")
+        safe_error = sanitize_error_message(e)
+        if solver_generation is not None:
+            fail_solver(
+                trip_id,
+                solver_generation,
+                solver_task_id,
+                safe_error,
+            )
+        app.logger.error(
+            "Error in ilp_solver for trip %s: %s\n%s",
+            trip_id,
+            safe_error,
+            sanitize_error_message(traceback.format_exc()),
+        )
         return jsonify({
+            "status": "failed",
             "error": "Failed to generate itinerary",
-            "details": str(e)
+            "details": safe_error
         }), 500
+    finally:
+        if solver_heartbeat is not None:
+            solver_heartbeat.stop()
+        trip_lock.release()
 
 
 

@@ -1,19 +1,20 @@
-import { createContext, useContext, useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
 
-const AuthContext = createContext();
+
+import { useState, useEffect } from "react";
+import { useNavigate } from "react-router-dom";
+import { AuthContext } from "./auth-context";
+
+const BASE =
+  import.meta.env?.VITE_API_BASE_URL || "http://127.0.0.1:5000";
+
 
 export const AuthProvider = ({ children }) => {
   const navigate = useNavigate();
-  const BASE = "http://127.0.0.1:5000";
-
 
   const [user, setUser] = useState(null);
-  const [loading, setLoading] = useState(true); // loading until /me completes
+  const [loading, setLoading] = useState(true);
 
-  // ----------------------------
-  //  Auto login on refresh
-  // ----------------------------
+  // Auto login on refresh
   useEffect(() => {
     const checkSession = async () => {
       try {
@@ -28,76 +29,92 @@ export const AuthProvider = ({ children }) => {
         } else {
           setUser(null);
         }
-      } catch (err) {
+      } catch {
         setUser(null);
+      } finally {
+        setLoading(false);
       }
-
-      setLoading(false);
     };
 
     checkSession();
   }, []);
 
-  // ----------------------------
-  //  Signup
-  // ----------------------------
-  const signup = async (name, email, password) => {
-    const res = await fetch(`${BASE}/signup`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, email, password }),
-    });
+  // Signup and login
+  const authenticate = async (endpoint, payload) => {
+    let response;
 
-    const data = await res.json();
-
-    if (res.ok) {
-      setUser(data.user);
-      return { success: true };
-    } else {
-      return { success: false, errors: data.errors };
+    try {
+      response = await fetch(`${BASE}/${endpoint}`, {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      });
+    } catch {
+      return {
+        success: false,
+        errors: {
+          network: [
+            "Unable to reach the server. Check your connection and try again.",
+          ],
+        },
+      };
     }
+
+    let data;
+
+    try {
+      data = await response.json();
+    } catch {
+      return {
+        success: false,
+        errors: {
+          server: [
+            "The server returned an invalid response. Please try again.",
+          ],
+        },
+      };
+    }
+
+    if (!response.ok) {
+      return {
+        success: false,
+        errors: data.errors || {
+          auth: ["The request could not be completed."],
+        },
+      };
+    }
+
+    setUser(data.user);
+    return { success: true };
   };
 
-  // ----------------------------
-  //  Login
-  // ----------------------------
-  const login = async (email, password) => {
-    const res = await fetch(`${BASE}/login`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    });
+  const signup = (name, email, password) =>
+    authenticate("signup", { name, email, password });
 
-    const data = await res.json();
+  const login = (email, password) =>
+    authenticate("login", { email, password });
 
-    if (res.ok) {
-      setUser(data.user);
-      return { success: true };
-    } else {
-      return { success: false, errors: data.errors };
-    }
-  };
-
-  // ----------------------------
-  //  Logout
-  // ----------------------------
+  // Logout
   const logout = async () => {
-    await fetch(`${BASE}/logout`, {
-      method: "POST",
-      credentials: "include",
-    });
-
-    setUser(null);
-    navigate("/"); // redirect to landing page
+    try {
+      await fetch(`${BASE}/logout`, {
+        method: "POST",
+        credentials: "include",
+      });
+    } finally {
+      setUser(null);
+      navigate("/");
+    }
   };
 
   return (
-    <AuthContext.Provider value={{ user, loading, signup, login, logout }}>
+    <AuthContext.Provider
+      value={{ user, loading, signup, login, logout }}
+    >
       {children}
     </AuthContext.Provider>
   );
 };
-
-export const useAuth = () => useContext(AuthContext);

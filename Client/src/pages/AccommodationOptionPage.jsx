@@ -45,12 +45,8 @@ export default function AccommodationOptionPage() {
       setLoading(true);
       await updateAccommodation(payload);
 
-      if (needsAccommodation === "yes") {
-        navigate(`/hotel-selection/${tripId}`);
-      } else {
-        navigate(`/trip-itinerary/${tripId}`);
-      }
-    } catch (err) {
+      navigate(`/trip-itinerary/${tripId}`);
+    } catch {
       alert("Failed to update accommodation details");
     } finally {
       setLoading(false);
@@ -155,6 +151,17 @@ export default function AccommodationOptionPage() {
           {/* Accommodation type */}
           {needsAccommodation === "yes" && (
             <>
+              <div
+                role="status"
+                className="rounded-lg border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900"
+              >
+                <p className="font-semibold">Hotel search is coming soon</p>
+                <p className="mt-1">
+                  You can save your accommodation preferences and continue.
+                  Hotel prices will not be included in this itinerary yet.
+                </p>
+              </div>
+
               <div>
                 <h2 className="text-sm mb-4 text-gray-900">
                   Select accommodation type
@@ -220,7 +227,7 @@ export default function AccommodationOptionPage() {
               size="lg"
               className="bg-gradient-to-r from-teal-500 to-teal-600 hover:from-teal-600 hover:to-teal-700 text-white px-8 py-6 rounded-lg shadow-lg hover:shadow-xl transition-all duration-200"
             >
-              Continue to Hotels
+              Continue to itinerary
               <ChevronRight className="w-5 h-5 ml-2" />
             </Button>
           </div>

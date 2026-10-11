@@ -12,7 +12,12 @@ import {
   Check,
   ChevronRight
 } from "lucide-react";
-import { getHotelOptions, chooseHotel } from "../services/tripService";
+import {
+  getHotelOptions,
+  chooseHotel,
+  retryTripTask,
+  pollUntil,
+} from "../services/tripService";
 
 export default function HotelSelectionPage() {
   const { tripId } = useParams();
@@ -23,39 +28,81 @@ export default function HotelSelectionPage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [statusMessage, setStatusMessage] = useState("Preparing places...");
+  const [retryTask, setRetryTask] = useState(null);
+  const [reloadCount, setReloadCount] = useState(0);
 
   useEffect(() => {
+    let cancelled = false;
+    const controller = new AbortController();
+
     async function fetchHotels() {
+      setLoading(true);
+      setError("");
+      setRetryTask(null);
       try {
-        const res = await getHotelOptions({ trip_id: tripId });
-        setHotels(res.hotels || []);
+        const result = await pollUntil(
+          (signal) => getHotelOptions({ trip_id: tripId }, signal),
+          (currentResult) => {
+            if (
+              currentResult.status === "processing" ||
+              currentResult.pending
+            ) {
+              setStatusMessage("Preparing places. This may take a moment...");
+              return false;
+            }
+            return true;
+          },
+          { signal: controller.signal }
+        );
+        if (cancelled || !result) return;
+        if (result.status === "failed") {
+          const taskName =
+            ["FAILURE", "RESULT_UNAVAILABLE"].includes(
+              result.task?.status
+            ) ||
+            ["FAILURE", "RESULT_UNAVAILABLE"].includes(
+              result.tasks?.clustering?.status
+            )
+              ? "clustering"
+              : null;
+          setRetryTask(taskName);
+          setError(result.task?.error || result.error || "Place search failed");
+          return;
+        }
+        setHotels(result.hotels || []);
       } catch (err) {
-        setError("Failed to load hotels");
+        if (cancelled) return;
+        setError(err.message || "Failed to load hotels");
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
     }
+
     fetchHotels();
-  }, [tripId]);
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
+  }, [tripId, reloadCount]);
+
+  const handleRetry = async () => {
+    if (!retryTask) return;
+    try {
+      await retryTripTask(tripId, retryTask);
+      setStatusMessage("Restarting place search...");
+      setReloadCount((count) => count + 1);
+    } catch (err) {
+      setError(err.message || "Failed to retry place search");
+    }
+  };
 
   const filteredHotels = hotels.filter(
     (h) =>
       h.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       h.address.toLowerCase().includes(searchQuery.toLowerCase())
   );
-
-  const handleSkipHotel = async () => {
-    try {
-      await chooseHotel({
-        trip_id: tripId,
-        skip_hotel: true,
-      });
-
-      navigate(`/trip-itinerary/${tripId}`);
-    } catch (err) {
-      alert("Failed to skip hotel selection");
-    }
-  };
 
 
   const handleContinue = async () => {
@@ -76,8 +123,26 @@ export default function HotelSelectionPage() {
     navigate(`/trip-itinerary/${tripId}`);
   };
 
-  if (loading) return <p className="p-6">Loading hotels...</p>;
-  if (error) return <p className="p-6 text-red-500">{error}</p>;
+  if (loading) return <p className="p-6">{statusMessage}</p>;
+  if (error) {
+    return (
+      <div className="p-6 text-red-500">
+        <p>{error}</p>
+        {retryTask ? (
+          <Button className="mt-4" onClick={handleRetry}>
+            Retry place search
+          </Button>
+        ) : (
+          <Button
+            className="mt-4"
+            onClick={() => setReloadCount((count) => count + 1)}
+          >
+            Check again
+          </Button>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">

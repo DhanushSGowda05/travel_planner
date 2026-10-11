@@ -1,8 +1,12 @@
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 import os
 import time
 import math
 import json
+import logging
+import re
 from statistics import mode, StatisticsError
 from dotenv import load_dotenv
 
@@ -11,6 +15,28 @@ from dotenv import load_dotenv
 # Note: The SERPAPI_KEY is hardcoded here for completion but should ideally be loaded from environment variables.
 load_dotenv()
 SERPAPI_KEY = os.getenv("SERPAPI_KEY")
+logger = logging.getLogger(__name__)
+
+def create_serpapi_session():
+    retry = Retry(
+        total=2,
+        connect=2,
+        read=2,
+        status=2,
+        backoff_factor=0.5,
+        status_forcelist=[429, 500, 502, 503, 504],
+        allowed_methods=["GET"],
+        respect_retry_after_header=True,
+    )
+
+    session = requests.Session()
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    return session
+
+
+serpapi_session = create_serpapi_session()
 
 # ==========================================
 # 1. CONFIGURATION
@@ -154,6 +180,113 @@ def calculate_smart_score(place, is_mandatory, is_hidden_gem):
     elif is_hidden_gem: boost = 15
     return round(popularity_score + boost, 2)
 
+
+def extract_valid_coordinates(place):
+    """Return finite, in-range coordinates from a Google Maps local result."""
+    gps = place.get("gps_coordinates")
+    if not isinstance(gps, dict):
+        return None
+
+    try:
+        latitude = float(gps["latitude"])
+        longitude = float(gps["longitude"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+    if not math.isfinite(latitude) or not math.isfinite(longitude):
+        return None
+    if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+        return None
+    if latitude == 0 and longitude == 0:
+        return None
+
+    return latitude, longitude
+
+
+
+def place_matches_destination(place, destination):
+    address = place.get("address")
+    if not isinstance(address, str) or not address.strip():
+        return False
+
+    def normalize(value):
+        return " ".join(
+            "".join(
+                char if char.isalnum() else " "
+                for char in value.lower()
+            ).split()
+        )
+
+    destination_parts = [
+        normalize(part) for part in destination.split(",")
+    ]
+
+    if not destination_parts[0]:
+        return False
+
+    city_aliases = {
+        "mangalore": {"mangalore", "mangaluru"},
+        "mangaluru": {"mangalore", "mangaluru"},
+    }
+
+    destination_city = destination_parts[0]
+    city_candidates = city_aliases.get(
+        destination_city, {destination_city}
+    )
+
+    if destination_city.endswith(" city"):
+        city_candidates.add(destination_city[:-5].strip())
+
+    address_parts = [
+        normalize(part) for part in address.split(",")
+    ]
+
+    for field in ("city", "locality", "municipality", "postal_town"):
+        value = place.get(field)
+        if isinstance(value, str) and value.strip():
+            address_parts.append(normalize(value))
+
+    return (
+        bool(city_candidates.intersection(address_parts))
+        and all(
+            qualifier in address_parts
+            for qualifier in destination_parts[1:]
+        )
+    )
+
+
+
+def place_matches_name(place, requested_name, destination):
+    """Require a normalized title match after removing trailing destination parts."""
+    title = place.get("title")
+    if not isinstance(title, str) or not title.strip():
+        return False
+
+    def normalize(value):
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", value.lower()).split())
+
+    requested_parts = [
+        normalize(part) for part in requested_name.split(",") if normalize(part)
+    ]
+    destination_parts = {
+        normalize(part) for part in destination.split(",") if normalize(part)
+    }
+    while len(requested_parts) > 1 and requested_parts[-1] in destination_parts:
+        requested_parts.pop()
+
+    return normalize(title) == " ".join(requested_parts)
+
+
+def _local_results(response):
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("Google Maps API returned an invalid response object.")
+    results = payload.get("local_results")
+    if not isinstance(results, list):
+        raise ValueError("Google Maps API returned an invalid local_results value.")
+    return results
+
+
 # ==========================================
 # 3. SEARCH FUNCTIONS
 # ==========================================
@@ -161,55 +294,101 @@ def calculate_smart_score(place, is_mandatory, is_hidden_gem):
 def search_mandatory_place(place_name, city):
     """Searches for a specific place the user MUST visit."""
     clean_name = place_name.strip()
-    queries = [f"{clean_name} {city}", f"{clean_name}"]
-    
-    for q in queries:
-        url = "https://serpapi.com/search"
-        params = {'engine': 'google_maps', 'q': q, 'api_key': SERPAPI_KEY, 'num': 1} 
-        try:
-            response = requests.get(url, params=params, timeout=5)
-            response.raise_for_status() 
-            results = response.json().get('local_results', [])
-            if results:
-                place = results[0].copy()
-                place['is_mandatory'] = True
-                place['preference_category'] = 'Mandatory'
-                return place
-        except Exception:
+    if not SERPAPI_KEY:
+        raise ValueError("SERPAPI_KEY is not set. Cannot search for places.")
+    response = requests.get(
+        "https://serpapi.com/search",
+        params={
+            "engine": "google_maps",
+            "type": "search",
+            "q": f"{clean_name} {city}",
+            "location": city,
+            "z": 14,
+            "api_key": SERPAPI_KEY,
+            "num": 5,
+        },
+        timeout=5,
+    )
+    response.raise_for_status()
+    results = _local_results(response)
+
+    for result in results:
+        if not isinstance(result, dict):
             continue
-            
-    # Return a default object if the search fails
-    return {
-        'title': clean_name, 'address': f"Location in {city} (Search Failed)",
-        'rating': 0, 'reviews': 0, 'gps_coordinates': {'latitude': 0, 'longitude': 0},
-        'is_mandatory': True, 'preference_category': 'Mandatory'
-    }
+        if not place_matches_destination(result, city):
+            continue
+        if not place_matches_name(result, clean_name, city):
+            continue
+        if extract_valid_coordinates(result) is None:
+            continue
+
+        place = result.copy()
+        place["is_mandatory"] = True
+        place["preference_category"] = "Mandatory"
+        return place
+
+    raise ValueError(
+        f"Mandatory place '{clean_name}' was not found in {city} "
+        "with a verifiable address and valid coordinates."
+    )
 
 def get_places_by_category(category_key, city):
     """Searches for places based on a preference category."""
     if not SERPAPI_KEY:
-        return []
+        raise ValueError("SERPAPI_KEY is not set. Cannot search for places.")
         
     config = ALL_PREFERENCES[category_key]
     url = "https://serpapi.com/search"
-    params = {'engine': 'google_maps', 'q': config["query"].format(city=city), 'api_key': SERPAPI_KEY, 'num': 8}
-    try:
-        response = requests.get(url, params=params, timeout=5)
-        response.raise_for_status()
-        results = response.json().get('local_results', [])
-        for p in results:
-            p['preference_category'] = category_key
-            p['is_mandatory'] = False
-            p['is_hidden_gem'] = False
-        return results
-    except Exception:
-        return []
+    params = {
+        "engine": "google_maps",
+        "type": "search",
+        "q": config["query"].format(city=city),
+        "location": city,
+        "z": 14,
+        "api_key": SERPAPI_KEY,
+        "num": 8,
+    }
+    response = serpapi_session.get(
+    url,
+    params=params,
+    timeout=(5, 15),
+)
+    response.raise_for_status()
+    results = _local_results(response)
+
+    places = []
+    rejected = 0
+    for result in results:
+        if not isinstance(result, dict):
+            rejected += 1
+            continue
+        if not place_matches_destination(result, city):
+            rejected += 1
+            continue
+        if extract_valid_coordinates(result) is None:
+            rejected += 1
+            continue
+
+        place = result.copy()
+        place["preference_category"] = category_key
+        place["is_mandatory"] = False
+        place["is_hidden_gem"] = False
+        places.append(place)
+
+    if rejected:
+        logger.warning(
+            "Rejected %s Google Maps result(s) for %s: missing/wrong destination "
+            "address or invalid coordinates.",
+            rejected,
+            city,
+        )
+    return places
 
 # ==========================================
 # 4. FINAL PROCESSORS
 # ==========================================
 
-def process_final_list(places, disliked_categories):
+def process_final_list(places, disliked_categories, city):
     """Deduplicates, filters, enriches data, and finalizes the list into the requested clean structured format."""
     unique_map = {}
     
@@ -229,6 +408,18 @@ def process_final_list(places, disliked_categories):
         
         # Filter: Skip non-mandatory places whose category is disliked
         if not is_mandatory and category in disliked_categories:
+            continue
+
+        coordinates = extract_valid_coordinates(p)
+        destination_match = place_matches_destination(p, city)
+        if coordinates is None or not destination_match:
+            message = (
+                f"Place '{p.get('title', 'Unknown place')}' has no verifiable "
+                f"address/valid coordinates in {city}."
+            )
+            if is_mandatory:
+                raise ValueError(message)
+            logger.warning("Skipping %s", message)
             continue
             
         # Enrich Data
@@ -291,14 +482,25 @@ def process_final_list(places, disliked_categories):
                 "saturday": "9 AM-9 PM",
                 "sunday": "9 AM-9 PM"
             }
-        gps = p.get('gps_coordinates', {})
-        
+        if not isinstance(cleaned_schedule, dict):
+            cleaned_schedule = {
+                day: "9 AM-9 PM"
+                for day in (
+                    "monday",
+                    "tuesday",
+                    "wednesday",
+                    "thursday",
+                    "friday",
+                    "saturday",
+                    "sunday",
+                )
+            }
         # Create the FINAL, CLEAN output dictionary
         final_list_unsorted.append({
             'name': p.get('title', 'Unknown Place'),
             'category': category.capitalize(),
-            'latitude': gps.get('latitude', 0),
-            'longitude': gps.get('longitude', 0),
+            'latitude': coordinates[0],
+            'longitude': coordinates[1],
             'address': p.get('address', 'Address not available'),
             'time_duration_hours': time_hours, 
             'smart_score': p['smart_score'],
@@ -392,7 +594,9 @@ def run_travel_planner_external(
         time.sleep(0.5)
 
     # 4. Final Processing and Structuring (This sorts and adds 'id')
-    final_itinerary_list = process_final_list(raw_places, disliked_categories)
+    final_itinerary_list = process_final_list(
+        raw_places, disliked_categories, city_name
+    )
     
     # 5. Limit the list based on num_of_days
     max_places = 5 * num_of_days

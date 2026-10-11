@@ -2,6 +2,8 @@ import os
 import time
 import json
 import math
+import logging
+import traceback
 import numpy as np
 import pandas as pd
 from celery import Celery
@@ -12,16 +14,28 @@ from pydantic import BaseModel, Field
 from langchain_google_genai import ChatGoogleGenerativeAI
 import poi_get  # Ensure this file is in the same directory
 from dotenv import load_dotenv
+from clustering_validation import validate_clustering_result
+from safe_errors import sanitize_error_message
 
 load_dotenv() 
 
 # --- 1. Configure Celery ---
 # Ensure Redis is running on localhost:6379
 celery = Celery(
-    'tasks', 
-    broker='redis://localhost:6379/0', 
-    backend='redis://localhost:6379/0'
+    'tasks',
+    broker=os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
+    backend=os.getenv(
+        "CELERY_RESULT_BACKEND",
+        os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0"),
+    ),
 )
+# Trip workflows need task results after they finish so hotel selection and the
+# solver can retrieve them; Redis eviction/persistence remains deployment-owned.
+celery.conf.update(
+    task_track_started=True,
+    result_expires=None,
+)
+logger = logging.getLogger(__name__)
 
 # --- 2. Define Data Models (for Gemini) ---
 class PriceEstimate(BaseModel):
@@ -52,8 +66,7 @@ def get_nearest_clusters(current_cluster_id, all_centers, top_n=2):
 
 # --- 4. Define Tasks ---
 
-@celery.task
-def get_travel_cost(city_name: str, budget_type: str = "basic"):
+def _get_travel_cost_result(city_name: str, budget_type: str = "basic"):
     """
     Celery task to calculate travel cost using Google Gemini.
     Falls back to ₹20,000 if Gemini fails.
@@ -134,9 +147,79 @@ def get_travel_cost(city_name: str, budget_type: str = "basic"):
         return fallback()
 
 
+def _run_persisted_task(workflow, trip_id, generation, work_task_id, operation):
+    from workflow_ledger import (
+        claim_task,
+        complete_work,
+        fail_work,
+        start_heartbeat,
+    )
+    import main
+
+    if trip_id is None or generation is None or work_task_id is None:
+        return operation()
+
+    with main.app.app_context():
+        if not claim_task(
+            trip_id,
+            workflow,
+            work_task_id,
+            generation,
+        ):
+            return None
+
+    heartbeat = start_heartbeat(
+        trip_id,
+        workflow,
+        generation,
+        work_task_id,
+    )
+    try:
+        result = operation()
+        heartbeat.assert_owned()
+        with main.app.app_context():
+            if not complete_work(
+                trip_id,
+                workflow,
+                generation,
+                work_task_id,
+                result,
+            ):
+                return None
+        return result
+    except Exception as error:
+        with main.app.app_context():
+            fail_work(
+                trip_id,
+                workflow,
+                generation,
+                work_task_id,
+                error,
+            )
+        raise
+    finally:
+        heartbeat.stop()
+
 
 @celery.task
-def perform_clustering(destination: str, days: int, mandatory_places: list, preferences: list, dislikes: list):
+def get_travel_cost(
+    city_name: str,
+    budget_type: str = "basic",
+    trip_id=None,
+    generation=None,
+    work_task_id=None,
+):
+    return _run_persisted_task(
+        "budget",
+        trip_id,
+        generation,
+        work_task_id,
+        lambda: _get_travel_cost_result(city_name, budget_type),
+    )
+
+
+
+def _perform_clustering_result(destination: str, days: int, mandatory_places: list, preferences: list, dislikes: list):
     """
     Celery task that fetches POI data using `poi_get` and performs K-Means Constrained clustering.
     
@@ -153,6 +236,9 @@ def perform_clustering(destination: str, days: int, mandatory_places: list, pref
     print(f"--- [Task Started] Clustering for {destination} ({days} days) ---")
 
     try:
+        if not isinstance(days, int) or days < 1:
+            raise ValueError("Clustering days must be a positive integer.")
+
         # 1. Get data from external source
         # This calls your existing poi_get.py logic
         input_data = poi_get.run_travel_planner_external(
@@ -165,23 +251,58 @@ def perform_clustering(destination: str, days: int, mandatory_places: list, pref
 
         # 2. Data Preparation
         if not input_data or 'places' not in input_data:
-             return {"error": "No places data returned from poi_get."}
+            raise ValueError("No places data returned from poi_get.")
 
         df = pd.DataFrame(input_data['places'])
         
         if df.empty:
-            return {"error": "Places DataFrame is empty."}
+            raise ValueError("Places DataFrame is empty.")
 
+        required_cols = {'id', 'is_mandatory', 'latitude', 'longitude'}
+        missing_cols = required_cols - set(df.columns)
+        if missing_cols:
+            raise ValueError(
+                f"Place data is missing required clustering columns: "
+                f"{', '.join(sorted(missing_cols))}."
+            )
+
+        df['is_mandatory'] = df['is_mandatory'].fillna(False).astype(bool)
+        coordinates = df[['latitude', 'longitude']].apply(
+            pd.to_numeric, errors='coerce'
+        )
+        valid_coordinates = (
+            np.isfinite(coordinates).all(axis=1)
+            & coordinates['latitude'].between(-90, 90)
+            & coordinates['longitude'].between(-180, 180)
+            & ~(
+                coordinates['latitude'].eq(0)
+                & coordinates['longitude'].eq(0)
+            )
+        )
+        invalid_mandatory = ~valid_coordinates & df['is_mandatory']
+        if invalid_mandatory.any():
+            if "name" in df:
+                invalid_names = df.loc[invalid_mandatory, "name"].astype(str).tolist()
+            else:
+                invalid_names = [str(index) for index in df.index[invalid_mandatory]]
+            raise ValueError(
+                "Mandatory places have invalid coordinates: "
+                + ", ".join(invalid_names)
+            )
+        rejected_count = int((~valid_coordinates).sum())
+        if rejected_count:
+            logger.warning(
+                "Rejected %s place(s) with invalid coordinates before clustering.",
+                rejected_count,
+            )
+            df = df.loc[valid_coordinates].copy()
+            coordinates = coordinates.loc[valid_coordinates]
+        if df.empty:
+            raise ValueError("No places with valid coordinates are available.")
+
+        df[['latitude', 'longitude']] = coordinates.astype(float)
         total_places = len(df)
         
-        # Ensure required columns exist
-        required_cols = ['score', 'is_mandatory', 'latitude', 'longitude']
-        for col in required_cols:
-            if col not in df.columns:
-                if col == 'is_mandatory': df[col] = False
-                elif col == 'latitude': df[col] = 0.0
-                elif col == 'longitude': df[col] = 0.0
-
         # Extract Features for Clustering
         X = df[['latitude', 'longitude']]
         
@@ -228,8 +349,8 @@ def perform_clustering(destination: str, days: int, mandatory_places: list, pref
                 "lat": float(center[0]),
                 "long": float(center[1])
             }
-        avg_center_lat = np.mean(cluster_centers[:, 0])
-        avg_center_long = np.mean(cluster_centers[:, 1])
+        avg_center_lat = df["latitude"].mean()
+        avg_center_long = df["longitude"].mean()
         centroid_output = {
             "values": cluster_center_values,
             "avg_lat": float(avg_center_lat),
@@ -272,8 +393,41 @@ def perform_clustering(destination: str, days: int, mandatory_places: list, pref
         }
         
         print(f"--- [Task Finished] Clustering completed for {len(df)} places. ---")
-        return final_structure
+        return validate_clustering_result(final_structure)
 
-    except Exception as e:
-        print(f"--- [Task Failed] Error: {e}")
-        return {"error": str(e)}
+    except Exception as error:
+        safe_error = sanitize_error_message(error)
+        safe_traceback = sanitize_error_message(traceback.format_exc())
+        logger.error(
+            "Clustering task failed for %s: %s\n%s",
+            destination,
+            safe_error,
+            safe_traceback,
+        )
+        raise RuntimeError(safe_error) from None
+
+
+@celery.task
+def perform_clustering(
+    destination: str,
+    days: int,
+    mandatory_places: list,
+    preferences: list,
+    dislikes: list,
+    trip_id=None,
+    generation=None,
+    work_task_id=None,
+):
+    return _run_persisted_task(
+        "clustering",
+        trip_id,
+        generation,
+        work_task_id,
+        lambda: _perform_clustering_result(
+            destination,
+            days,
+            mandatory_places,
+            preferences,
+            dislikes,
+        ),
+    )

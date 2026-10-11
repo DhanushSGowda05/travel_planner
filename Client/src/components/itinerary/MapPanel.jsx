@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useState} from "react";
 import { OlaMaps } from "olamaps-web-sdk";
 import {
   Navigation,

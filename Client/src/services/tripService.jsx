@@ -1,4 +1,5 @@
-const BASE = "http://127.0.0.1:5000";
+const BASE =
+  import.meta.env?.VITE_API_BASE_URL || "http://127.0.0.1:5000";
 
 /* -----------------------------------------------------
    CREATE TRIP
@@ -115,16 +116,42 @@ export async function updateAccommodation(payload) {
 /* -----------------------------------------------------
    FETCH HOTEL OPTIONS
 ----------------------------------------------------- */
-export async function getHotelOptions(payload) {
+export async function getHotelOptions(payload, signal) {
   const res = await fetch(`${BASE}/hotel_option`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(payload),
+    signal,
   });
 
-  if (!res.ok) throw new Error("Failed to fetch hotels");
-  return res.json();
+  const data = await res.json();
+  if (res.status === 202 || res.ok || data.status === "failed") return data;
+  throw new Error(data.error || "Failed to fetch hotels");
+}
+
+export async function getTripTaskStatus(tripId, signal) {
+  const res = await fetch(`${BASE}/trip/${tripId}/status`, {
+    credentials: "include",
+    signal,
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "Failed to fetch trip status");
+  return data;
+}
+
+export async function retryTripTask(tripId, taskName, signal) {
+  const res = await fetch(
+    `${BASE}/trip/${tripId}/tasks/${taskName}/retry`,
+    {
+      method: "POST",
+      credentials: "include",
+      signal,
+    }
+  );
+  const data = await res.json();
+  if (res.status === 202 || res.ok) return data;
+  throw new Error(data.error || "Failed to retry trip task");
 }
 
 /* -----------------------------------------------------
@@ -161,12 +188,13 @@ export async function deleteTrip(payload) {
    BACKEND expects: { trip_id }
 ----------------------------------------------------- */
 
-export async function runIlpSolver(payload) {
+export async function runIlpSolver(payload, signal) {
   const res = await fetch(`${BASE}/ilp_solver`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "include",
     body: JSON.stringify(payload),
+    signal,
   });
 
   const contentType = res.headers.get("content-type") || "";
@@ -174,7 +202,17 @@ export async function runIlpSolver(payload) {
     ? await res.json()
     : await res.text();
 
+  if (res.status === 202) {
+    return {
+      ...data,
+      pending: true,
+    };
+  }
+
   if (!res.ok) {
+    if (data?.reason === "solver_attempts_exhausted") {
+      return data;
+    }
     const message =
       typeof data === "object"
         ? data.details || data.error || JSON.stringify(data)
@@ -191,9 +229,10 @@ export async function runIlpSolver(payload) {
 
 //view button get itinerary
 
-export async function getItineraryFromDB(tripId) {
+export async function getItineraryFromDB(tripId, signal) {
   const res = await fetch(`${BASE}/itinerary/${tripId}`, {
     credentials: "include",
+    signal,
   });
 
   const contentType = res.headers.get("content-type") || "";
@@ -201,9 +240,12 @@ export async function getItineraryFromDB(tripId) {
     ? await res.json()
     : await res.text();
 
-  // The trip exists, but the itinerary is not ready yet.
   if (res.status === 202) {
-    return null;
+    return data;
+  }
+
+  if (data?.status === "failed") {
+    return data;
   }
 
   if (!res.ok) {
@@ -217,6 +259,117 @@ export async function getItineraryFromDB(tripId) {
     );
   }
 
-  return data.itinerary ?? null;
+  return data;
 }
 
+export async function getItineraryAndRecover(tripId, signal) {
+  const current = await getItineraryFromDB(tripId, signal);
+  if (current?.status !== "processing") return current;
+
+  const recovered = await runIlpSolver({ trip_id: tripId }, signal);
+  if (recovered?.status === "failed") return recovered;
+  if (recovered?.pending || recovered?.status === "processing") {
+    return current;
+  }
+  return {
+    exists: true,
+    status: "completed",
+    itinerary: recovered,
+  };
+}
+
+export async function loadOrGenerateItinerary(
+  tripId,
+  waitForTasks,
+  signal
+) {
+  const saved = await getItineraryFromDB(tripId, signal);
+  if (saved?.exists && saved.itinerary) {
+    return { itinerary: saved.itinerary, generated: false };
+  }
+  if (saved?.status === "failed") {
+    return { failure: saved, generated: false };
+  }
+
+  const ready = await waitForTasks();
+  if (!ready || signal?.aborted) return { cancelled: true, generated: false };
+  return {
+    result: await runIlpSolver({ trip_id: tripId }, signal),
+    generated: true,
+  };
+}
+
+export class PollingTimeoutError extends Error {
+  constructor() {
+    super(
+      "This is taking longer than expected. Check again shortly; the task was not restarted."
+    );
+    this.name = "PollingTimeoutError";
+  }
+}
+
+export async function pollUntil(
+  fetchValue,
+  isComplete,
+  {
+    signal,
+    timeoutMs = 5 * 60 * 1000,
+    pollIntervalMs = 3000,
+  } = {}
+) {
+  const deadline = Date.now() + timeoutMs;
+  while (!signal?.aborted) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new PollingTimeoutError();
+
+    const requestController = new AbortController();
+    let resolveAbort;
+    const aborted = new Promise((resolve) => {
+      resolveAbort = resolve;
+    });
+    const abortRequest = () => {
+      requestController.abort();
+      resolveAbort(null);
+    };
+    signal?.addEventListener("abort", abortRequest, { once: true });
+    if (signal?.aborted) abortRequest();
+    let timeoutId;
+    const timeout = new Promise((resolve, reject) => {
+      timeoutId = setTimeout(() => {
+        abortRequest();
+        reject(new PollingTimeoutError());
+      }, remaining);
+    });
+    let value;
+    try {
+      value = await Promise.race([
+        fetchValue(requestController.signal),
+        timeout,
+        aborted,
+      ]);
+    } catch (error) {
+      if (signal?.aborted) return null;
+      if (Date.now() >= deadline) throw new PollingTimeoutError();
+      throw error;
+    } finally {
+      clearTimeout(timeoutId);
+      signal?.removeEventListener("abort", abortRequest);
+    }
+
+    if (signal?.aborted) return null;
+    if (isComplete(value)) return value;
+    const waitMs = Math.min(pollIntervalMs, deadline - Date.now());
+    if (waitMs <= 0) throw new PollingTimeoutError();
+    await new Promise((resolve) => {
+      let timeout;
+      const finish = () => {
+        clearTimeout(timeout);
+        signal?.removeEventListener("abort", finish);
+        resolve();
+      };
+      timeout = setTimeout(finish, waitMs);
+      signal?.addEventListener("abort", finish, { once: true });
+    });
+  }
+  return null;
+}

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useAuth } from "../context/AuthContext";
+import { useAuth } from "../context/useAuth";
 import { useNavigate, Link } from "react-router-dom";
 
 export default function SignIn() {
@@ -18,11 +18,17 @@ export default function SignIn() {
     setLoading(true);
     setErrors(null);
 
-    const res = await login(form.email, form.password);
-    if (res.success) navigate("/dashboard");
-    else setErrors(res.errors);
-
-    setLoading(false);
+    try {
+      const res = await login(form.email, form.password);
+      if (res.success) navigate("/dashboard");
+      else setErrors(res.errors);
+    } catch {
+      setErrors({
+        network: ["Unable to sign in. Check your connection and try again."],
+      });
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (

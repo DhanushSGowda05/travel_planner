@@ -8,7 +8,8 @@ import { useNavigate } from "react-router-dom";
 import { deleteTrip } from "../../services/tripService";
 import { StatsGrid } from "./StatsGrid";
 
-const API_BASE = "http://127.0.0.1:5000";
+const API_BASE =
+  import.meta.env?.VITE_API_BASE_URL || "http://127.0.0.1:5000";
 
 // Helper: compute inclusive days between two dates (returns integer >= 0)
 // Accepts date strings or Date objects. Returns null if invalid.
@@ -27,7 +28,7 @@ function getDaysBetween(start, end) {
 
     // inclusive duration: e.g., same day => 1 day
     return diffDays >= 0 ? diffDays + 1 : null;
-  } catch (err) {
+  } catch  {
     return null;
   }
 }
