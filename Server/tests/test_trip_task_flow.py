@@ -2008,6 +2008,36 @@ class PlaceValidationTests(unittest.TestCase):
             (19.1, 72.8),
         )
 
+    def test_destination_match_accepts_chamundi_hill_for_mysore(self):
+        place = {
+            "title": "Shri Chamundeshwari Temple",
+            "address": (
+                "Shri Chamundeshwari Temple Road, Chamundi Hill, "
+                "Chamundibetta, Karnataka 570010, India"
+            ),
+            "gps_coordinates": {
+                "latitude": 12.272,
+                "longitude": 76.67,
+            },
+        }
+
+        self.assertTrue(
+            poi_get.place_matches_destination(place, "Mysore")
+        )
+
+    def test_destination_match_rejects_wrong_qualifiers_for_mysore(self):
+        place = {
+            "address": (
+                "Chamundi Hill, Chamundibetta, Maharashtra, India"
+            ),
+        }
+
+        self.assertFalse(
+            poi_get.place_matches_destination(
+                place, "Mysore, Karnataka, India"
+            )
+        )
+
     @patch.object(poi_get, "SERPAPI_KEY", "test-key")
     @patch.object(poi_get.serpapi_session, "get")
     def test_category_search_biases_destination_and_rejects_wrong_city(
@@ -2086,6 +2116,35 @@ class PlaceValidationTests(unittest.TestCase):
             poi_get.place_matches_destination(
                 massachusetts_place, "Springfield, Illinois, United States"
             )
+        )
+    def test_destination_match_accepts_mysuru_alias(self):
+        place = {
+            "address": (
+                    "Agrahara, Chamrajpura, Mysuru, Karnataka 570001, India"
+            ),
+            "gps_coordinates": {
+                "latitude": 12.305163,
+                "longitude": 76.655175,
+            },
+        }
+
+        self.assertTrue(
+            poi_get.place_matches_destination(place, "Mysore")
+        )
+
+
+    def test_destination_match_rejects_missing_address(self):
+        place = {
+            "title": "Chamundeshwari Temple",
+            "gps_coordinates": {
+                "latitude": 12.272,
+                "longitude": 76.67,
+            },
+        }
+
+
+        self.assertFalse(
+            poi_get.place_matches_destination(place, "Mysore")
         )
 
     @patch.object(poi_get, "SERPAPI_KEY", "test-key")
@@ -2321,6 +2380,7 @@ class TripPreferenceInterpreterTests(unittest.TestCase):
                 json={"description": "A relaxed trip to Mysuru"},
             )
         self.assertEqual(response.status_code, 503)
+
 
 
 if __name__ == "__main__":

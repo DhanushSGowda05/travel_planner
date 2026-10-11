@@ -204,6 +204,7 @@ def extract_valid_coordinates(place):
 
 
 
+
 def place_matches_destination(place, destination):
     address = place.get("address")
     if not isinstance(address, str) or not address.strip():
@@ -232,8 +233,8 @@ def place_matches_destination(place, destination):
     }
 
     destination_city = destination_parts[0]
-    city_candidates = city_aliases.get(
-        destination_city, {destination_city}
+    city_candidates = set(
+        city_aliases.get(destination_city, {destination_city})
     )
 
     if destination_city.endswith(" city"):
@@ -248,13 +249,26 @@ def place_matches_destination(place, destination):
         if isinstance(value, str) and value.strip():
             address_parts.append(normalize(value))
 
-    return (
-        bool(city_candidates.intersection(address_parts))
-        and all(
-            qualifier in address_parts
-            for qualifier in destination_parts[1:]
+    city_match = bool(city_candidates.intersection(address_parts))
+
+    # Allow this recognized Mysore-area locality when the city
+    # name is absent from the address.
+    mysore_localities = {
+        "chamundi hill",
+        "chamundibetta",
+    }
+
+    if destination_city in {"mysore", "mysuru"}:
+        city_match = city_match or bool(
+            mysore_localities.intersection(address_parts)
         )
+
+    qualifier_match = all(
+        qualifier in address_parts
+        for qualifier in destination_parts[1:]
     )
+
+    return city_match and qualifier_match
 
 
 def place_matches_name(place, requested_name, destination):
