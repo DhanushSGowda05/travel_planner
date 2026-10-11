@@ -1875,6 +1875,119 @@ class TripTaskFlowTests(unittest.TestCase):
         self.assertIs(validate_clustering_result(result), result)
 
 
+    def _create_itinerary_for_insights_test(self):
+        result = self.make_trip(destination="Mumbai")
+        trip_id = result["trip_id"]
+
+        daily_plan = {
+            "2026-11-01": {
+                "places": [
+                    {
+                        "id": 101,
+                        "name": "Gateway of India",
+                        "category": "History",
+                        "description": "Historic waterfront monument",
+                        "time_duration_hours": 1.0,
+                    }
+                ]
+            }
+        }
+
+        with main.app.app_context():
+            itinerary = main.Itinerary(
+                trip_id=trip_id,
+                daily_plan=daily_plan,
+            )
+            main.db.session.add(itinerary)
+            main.db.session.commit()
+
+        return trip_id
+
+    def test_place_insights_returns_cached_result_without_calling_gemini(self):
+        trip_id = self._create_itinerary_for_insights_test()
+        expected_insights = {
+            "overview": "A historic waterfront landmark.",
+            "highlights": ["Architecture", "Harbour views", "Photography"],
+            "tips": ["Allow time for photographs", "Check local conditions"],
+            "suggested_duration": "Around 1 hour",
+        }
+
+        with main.app.app_context():
+            main.db.session.add(
+                main.PlaceInsight(
+                    trip_id=trip_id,
+                    place_key="101",
+                    place_name="Gateway of India",
+                    insights=expected_insights,
+                )
+            )
+            main.db.session.commit()
+
+        with patch.object(
+            main,
+            "ChatGoogleGenerativeAI",
+            side_effect=AssertionError("Gemini should not be called"),
+        ):
+            response = self.client.post(
+                f"/trip/{trip_id}/places/insights",
+                json={
+                    "place_id": 101,
+                    "place_name": "Gateway of India",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["cached"])
+        self.assertEqual(body["insights"], expected_insights)
+
+    def test_place_insights_rejects_place_not_in_itinerary(self):
+        trip_id = self._create_itinerary_for_insights_test()
+
+        with patch.object(
+            main,
+            "ChatGoogleGenerativeAI",
+            side_effect=AssertionError("Gemini should not be called"),
+        ):
+            response = self.client.post(
+                f"/trip/{trip_id}/places/insights",
+                json={
+                    "place_id": 999,
+                    "place_name": "Unrelated place",
+                },
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertIn("error", response.get_json())
+
+    def test_place_insights_handles_gemini_failure_without_caching(self):
+        trip_id = self._create_itinerary_for_insights_test()
+
+        with (
+            patch.dict(os.environ, {"GOOGLE_API_KEY": "test-key"}),
+            patch.object(
+                main,
+                "ChatGoogleGenerativeAI",
+                side_effect=RuntimeError("Simulated Gemini failure"),
+            ),
+        ):
+            response = self.client.post(
+                f"/trip/{trip_id}/places/insights",
+                json={
+                    "place_id": 101,
+                    "place_name": "Gateway of India",
+                },
+            )
+
+        self.assertEqual(response.status_code, 502)
+
+        with main.app.app_context():
+            cached = main.PlaceInsight.query.filter_by(
+                trip_id=trip_id,
+                place_key="101",
+            ).first()
+            self.assertIsNone(cached)
+
 class PlaceValidationTests(unittest.TestCase):
     def test_coordinates_reject_missing_nonfinite_out_of_range_and_zero_pair(self):
         invalid_places = [

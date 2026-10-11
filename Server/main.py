@@ -16,6 +16,7 @@ from flask_login import (
     login_required,
     current_user,
 )
+from langchain_google_genai import ChatGoogleGenerativeAI
 from werkzeug.security import generate_password_hash, check_password_hash
 from flask_cors import CORS
 from pydantic import BaseModel, EmailStr, ValidationError, field_validator, model_validator, PositiveInt 
@@ -566,6 +567,39 @@ class Itinerary(db.Model):
         'Trip', 
         backref=db.backref('itinerary', uselist=False, cascade="all, delete-orphan")
     )
+
+class PlaceInsight(db.Model):
+    __tablename__ = "place_insight"
+    __table_args__ = (
+        db.UniqueConstraint(
+            "trip_id",
+            "place_key",
+            name="uq_place_insight_trip_place",
+        ),
+    )
+
+    id = db.Column(db.Integer, primary_key=True)
+    trip_id = db.Column(
+        db.Integer,
+        db.ForeignKey("trip.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    place_key = db.Column(db.String(255), nullable=False)
+    place_name = db.Column(db.String(255), nullable=False)
+    insights = db.Column(db.JSON, nullable=False)
+    created_at = db.Column(
+        db.DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+    updated_at = db.Column(
+        db.DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
 # --- FLASK-LOGIN CALLBACKS ---
 
 # This callback is used to reload the user object from the user ID
@@ -1709,6 +1743,186 @@ def get_itinerary(trip_id):
         "itinerary": daily_plan
     }), 200
 
+
+@app.route("/trip/<int:trip_id>/places/insights", methods=["POST"])
+@login_required
+def get_place_insights(trip_id):
+    data = request.get_json(silent=True) or {}
+    if not isinstance(data, dict):
+        return jsonify({"error": "Invalid request body."}), 400
+
+    place_id = data.get("place_id")
+    place_name = data.get("place_name")
+
+    if (
+        place_id is None
+        or isinstance(place_id, bool)
+        or not isinstance(place_name, str)
+        or not place_name.strip()
+    ):
+        return jsonify({
+            "error": "place_id and place_name are required."
+        }), 400
+
+    if str(place_id) == "LUNCH_BREAK":
+        return jsonify({
+            "error": "Meal-break entries do not have place insights."
+        }), 400
+
+    trip = Trip.query.filter_by(
+        id=trip_id,
+        user_id=current_user.id,
+    ).first()
+
+    if trip is None:
+        return jsonify({"error": "Trip not found."}), 404
+
+    itinerary = Itinerary.query.filter_by(trip_id=trip_id).first()
+    if itinerary is None or not isinstance(itinerary.daily_plan, dict):
+        return jsonify({"error": "Saved itinerary not found."}), 404
+
+    matched_place = None
+    for day in itinerary.daily_plan.values():
+        if not isinstance(day, dict):
+            continue
+        for place in day.get("places", []):
+            if not isinstance(place, dict):
+                continue
+            if (
+                str(place.get("id")) == str(place_id)
+                and place.get("name", "").strip().casefold()
+                == place_name.strip().casefold()
+            ):
+                matched_place = place
+                break
+        if matched_place:
+            break
+
+    if matched_place is None:
+        return jsonify({
+            "error": "Place does not belong to this itinerary."
+        }), 404
+
+    place_key = str(place_id)
+    cached = PlaceInsight.query.filter_by(
+        trip_id=trip_id,
+        place_key=place_key,
+    ).first()
+
+    if cached is not None:
+        if cached.place_name.casefold() == place_name.strip().casefold():
+            return jsonify({
+                "insights": cached.insights,
+                "cached": True,
+            }), 200
+
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not api_key:
+        return jsonify({
+            "error": "AI insights are temporarily unavailable."
+        }), 503
+
+    try:
+        from langchain_core.prompts import ChatPromptTemplate
+
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-3.8-flash",
+            temperature=0.3,
+            google_api_key=api_key,
+        )
+
+        prompt = ChatPromptTemplate.from_messages([
+            (
+                "system",
+                """
+                You are a careful travel guide. Return valid JSON only with:
+                overview: string, concise description and significance;
+                highlights: array of 3 to 5 short strings;
+                tips: array of 3 to 5 practical visitor tips;
+                suggested_duration: string, approximate visit duration.
+
+                Do not invent specific opening hours, prices, current conditions,
+                or unsupported historical claims. If information is uncertain,
+                say so briefly. Suggested duration must be approximate.
+                """,
+            ),
+            (
+                "human",
+                "Provide travel insights for this place.\n"
+                "Name: {name}\n"
+                "City: {city}\n"
+                "Category: {category}\n"
+                "Existing description: {description}",
+            ),
+        ])
+
+        response = (prompt | llm).invoke({
+            "name": matched_place.get("name", place_name),
+            "city": trip.destination_city,
+            "category": str(matched_place.get("category", "Attraction")),
+            "description": str(matched_place.get("description", ""))[:1000],
+        })
+
+        content = response.content
+        if isinstance(content, list):
+            content = "".join(
+                item.get("text", "")
+                for item in content
+                if isinstance(item, dict) and item.get("type") == "text"
+            )
+
+        content = str(content).strip()
+        if content.startswith("```"):
+            content = content.split("\n", 1)[-1]
+            if content.endswith("```"):
+                content = content[:-3].strip()
+            if content.startswith("json"):
+                content = content[4:].strip()
+
+        insights = json.loads(content)
+
+        if (
+            not isinstance(insights, dict)
+            or not isinstance(insights.get("overview"), str)
+            or not isinstance(insights.get("highlights"), list)
+            or not isinstance(insights.get("tips"), list)
+            or not isinstance(insights.get("suggested_duration"), str)
+            or not all(isinstance(x, str) for x in insights["highlights"])
+            or not all(isinstance(x, str) for x in insights["tips"])
+        ):
+            raise ValueError("Invalid insights structure")
+
+        cached = PlaceInsight.query.filter_by(
+            trip_id=trip_id,
+            place_key=place_key,
+        ).first()
+
+        if cached is None:
+            cached = PlaceInsight(
+                trip_id=trip_id,
+                place_key=place_key,
+                place_name=place_name.strip(),
+                insights=insights,
+            )
+            db.session.add(cached)
+        else:
+            cached.place_name = place_name.strip()
+            cached.insights = insights
+            cached.updated_at = datetime.utcnow()
+
+        db.session.commit()
+
+        return jsonify({
+            "insights": insights,
+            "cached": False,
+        }), 200
+
+    except Exception:
+        db.session.rollback()
+        app.logger.exception("Failed to generate place insights")
+        return jsonify({
+            "error": "Could not generate insights for this place. Please try again."
+        }), 502
 
 
 

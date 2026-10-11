@@ -373,3 +373,38 @@ export async function pollUntil(
   }
   return null;
 }
+
+
+/* -----------------------------------------------------
+   FETCH AI PLACE INSIGHTS
+----------------------------------------------------- */
+export async function getPlaceInsights(
+  tripId,
+  placeId,
+  placeName,
+  signal
+) {
+  const res = await fetch(
+    `${BASE}/trip/${encodeURIComponent(tripId)}/places/insights`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      signal,
+      body: JSON.stringify({
+        place_id: placeId,
+        place_name: placeName,
+      }),
+    }
+  );
+
+  const data = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    throw new Error(
+      data.error || "Unable to load insights for this place."
+    );
+  }
+
+  return data;
+}

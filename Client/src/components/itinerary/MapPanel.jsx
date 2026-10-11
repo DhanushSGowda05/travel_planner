@@ -1,25 +1,12 @@
 import { useEffect, useRef, useState} from "react";
 import { OlaMaps } from "olamaps-web-sdk";
 import {
-  Navigation,
   ChevronLeft,
   ChevronRight,
-  Clock,
-  DollarSign,
-  MapPin,
-  X,
 } from "lucide-react";
 
 const OLA_API_KEY = "CornDpxoVHMISlbCN8ePrPdauyrHDeIBZotfvRdy";
 
-/* ---------- Format duration ---------- */
-const formatDuration = (hours) => {
-  const h = Math.floor(hours);
-  const m = Math.round((hours - h) * 60);
-  if (h === 0) return `${m}m`;
-  if (m === 0) return `${h}h`;
-  return `${h}h ${m}m`;
-};
 
 export default function MapPanel({
   places,
@@ -160,59 +147,6 @@ export default function MapPanel({
           <ChevronRight className="w-5 h-5" />
         </button>
       </div>
-
-      {/* ---------- Place Detail Floating Card ---------- */}
-      {selectedPlace && (
-        <div
-          className="
-            absolute bottom-6 right-6 z-30
-            w-[340px] max-w-[calc(100vw-2rem)]
-            bg-white/95 backdrop-blur
-            rounded-2xl border border-slate-200
-            shadow-xl
-            animate-in fade-in slide-in-from-bottom-2
-          "
-        >
-          <div className="p-4 relative">
-            {/* Close */}
-            <button
-              onClick={() => onSelectPlace(null)}
-              className="absolute top-3 right-3 p-1 rounded-md hover:bg-slate-100"
-            >
-              <X className="w-4 h-4 text-slate-500" />
-            </button>
-
-            {/* Title */}
-            <div className="flex items-start gap-2 pr-6">
-              <MapPin className="w-4 h-4 text-blue-600 mt-0.5" />
-              <h3 className="text-base font-semibold text-slate-900 leading-snug">
-                {selectedPlace.name}
-              </h3>
-            </div>
-
-            {/* Meta */}
-            <div className="mt-4 pt-3 border-t border-slate-100 space-y-2 text-sm text-slate-600">
-              <div className="flex items-center gap-2">
-                <Clock className="w-4 h-4" />
-                {selectedPlace.start_time}
-                {selectedPlace.end_time && ` – ${selectedPlace.end_time}`}
-              </div>
-
-              <div className="flex items-center gap-2">
-                <Navigation className="w-4 h-4" />
-                {formatDuration(selectedPlace.time_duration_hours)}
-              </div>
-
-              {typeof selectedPlace.price === "number" &&
-                selectedPlace.price > 0 && (
-                  <div className="flex items-center gap-2">
-                    <DollarSign className="w-4 h-4" />₹{selectedPlace.price}
-                  </div>
-                )}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }

@@ -10,6 +10,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import AppSidebar from "@/components/itinerary/AppSidebar";
 import ItineraryPanel from "@/components/itinerary/ItineraryPanel";
 import MapPanel from "@/components/itinerary/MapPanel";
+import PlaceInsightsPanel from "@/components/itinerary/PlaceInsightsPanel";
 
 import {
   getItineraryAndRecover,
@@ -18,6 +19,7 @@ import {
   runIlpSolver,
   loadOrGenerateItinerary,
   pollUntil,
+  getPlaceInsights,
 } from "@/services/tripService";
 import {
   itineraryPageViewState,
@@ -57,6 +59,11 @@ export default function ItineraryPage() {
   const [reloadCount, setReloadCount] = useState(0);
   const [loadState, setLoadState] = useState("loading");
   const [loadStateTripId, setLoadStateTripId] = useState(tripId);
+  const [placeInsights, setPlaceInsights] = useState(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsError, setInsightsError] = useState("");
+  const [insightsRetryCount, setInsightsRetryCount] = useState(0);
+  const [placeInsightsOpen, setPlaceInsightsOpen] = useState(false);
 
   const requestGeneration = useRef(0);
   const activeTripId = useRef(tripId);
@@ -346,29 +353,91 @@ export default function ItineraryPage() {
       .find((place) => String(place.id) === String(selectedPlace.id)) || null;
   }, [currentTrip, daysArray, selectedPlace]);
 
+  useEffect(() => {
+  if (
+    !currentTrip?.id ||
+    !currentSelectedPlace ||
+    String(currentSelectedPlace.id) === "LUNCH_BREAK"
+  ) {
+    setPlaceInsights(null);
+    setInsightsLoading(false);
+    setInsightsError("");
+    return undefined;
+  }
+
+  const controller = new AbortController();
+  let cancelled = false;
+
+  setPlaceInsights(null);
+  setInsightsError("");
+  setInsightsLoading(true);
+
+  getPlaceInsights(
+    currentTrip.id,
+    currentSelectedPlace.id,
+    currentSelectedPlace.name,
+    controller.signal
+  )
+    .then((data) => {
+      if (!cancelled) {
+        setPlaceInsights(data.insights);
+      }
+    })
+    .catch((err) => {
+      if (!cancelled && err.name !== "AbortError") {
+        setInsightsError(
+          err.message || "Unable to load place insights."
+        );
+      }
+    })
+    .finally(() => {
+      if (!cancelled) {
+        setInsightsLoading(false);
+      }
+    });
+
+  return () => {
+    cancelled = true;
+    controller.abort();
+  };
+}, [
+  currentTrip?.id,
+  currentSelectedPlace,
+  insightsRetryCount,
+]);
+
   const allPlacesForCurrentDay =
     currentDay?.places || [];
 
   /* ------------------ HANDLERS ------------------ */
   const handleSelectPlace = useCallback(
-    (place) => {
-      setSelectedPlace(place);
+  (place) => {
+    setSelectedPlace(place);
 
-      if (place && currentTrip?.itinerary) {
-        const dateWithPlace = sortedDates.find(
-          (date) =>
-            currentTrip.itinerary[date].places.some(
-              (p) => p.id === place.id
-            )
-        );
+    // Open insights when selecting a real place.
+    // Meal-break entries should not display insights.
+    if (place && String(place.id) !== "LUNCH_BREAK") {
+      setPlaceInsightsOpen(true);
+    } else {
+      setPlaceInsightsOpen(false);
+    }
 
-        if (dateWithPlace) {
-          setSelectedDate(dateWithPlace);
-        }
+    // Preserve the existing date-selection behavior.
+    if (place && currentTrip?.itinerary) {
+      const dateWithPlace = sortedDates.find(
+        (date) =>
+          currentTrip.itinerary[date].places.some(
+            (p) => String(p.id) === String(place.id)
+          )
+      );
+
+      if (dateWithPlace) {
+        setSelectedDate(dateWithPlace);
       }
-    },
-    [sortedDates, currentTrip]
-  );
+    }
+  },
+  [sortedDates, currentTrip]
+);
 
   const handleNavigateDay = useCallback(
     (direction) => {
@@ -467,37 +536,51 @@ export default function ItineraryPage() {
             }
           />
 
-          {/* Main Content */}
-          <div className="flex-1 flex min-w-0">
-            {/* Itinerary Panel */}
-            <div className="w-[40%] min-w-[360px] border-r border-border">
-              <ItineraryPanel
-                tripName={currentTrip.name}
-                startDate={currentTrip.startDate}
-                endDate={currentTrip.endDate}
-                days={daysArray}
-                selectedPlaceId={
-                  currentSelectedPlace
-                    ? String(currentSelectedPlace.id)
-                    : null
-                }
-                selectedDate={currentSelectedDate}
-                onSelectPlace={handleSelectPlace}
-              />
-            </div>
+{/* Main Content */}
+<div className="flex-1 flex min-w-0 min-h-0">
+  {/* Itinerary Panel */}
+  <div className="w-[40%] min-w-[360px] min-h-0 border-r border-border">
+    <ItineraryPanel
+      tripName={currentTrip.name}
+      startDate={currentTrip.startDate}
+      endDate={currentTrip.endDate}
+      days={daysArray}
+      selectedPlaceId={
+        currentSelectedPlace
+          ? String(currentSelectedPlace.id)
+          : null
+      }
+      selectedDate={currentSelectedDate}
+      onSelectPlace={handleSelectPlace}
+    />
+  </div>
 
-            {/* Map Panel */}
-            <div className="flex-1">
-              <MapPanel
-                places={allPlacesForCurrentDay}
-                selectedPlace={currentSelectedPlace}
-                onSelectPlace={handleSelectPlace}
-                currentDayIndex={currentDayIndex}
-                totalDays={sortedDates.length}
-                onNavigateDay={handleNavigateDay}
-              />
-            </div>
-          </div>
+  {/* Map + Floating AI Insights */}
+  <div className="relative flex-1 min-w-0 min-h-0">
+    <MapPanel
+      places={allPlacesForCurrentDay}
+      selectedPlace={currentSelectedPlace}
+      onSelectPlace={handleSelectPlace}
+      currentDayIndex={currentDayIndex}
+      totalDays={sortedDates.length}
+      onNavigateDay={handleNavigateDay}
+    />
+
+    {placeInsightsOpen && currentSelectedPlace && (
+<div className="absolute bottom-4 right-4 z-[1000] w-[360px] max-w-[calc(100%-2rem)]">        <PlaceInsightsPanel
+          place={currentSelectedPlace}
+          insights={placeInsights}
+          loading={insightsLoading}
+          error={insightsError}
+          onRetry={() =>
+            setInsightsRetryCount((count) => count + 1)
+          }
+          onClose={() => setPlaceInsightsOpen(false)}
+        />
+      </div>
+    )}
+  </div>
+</div>
         </>
       )}
     </div>
